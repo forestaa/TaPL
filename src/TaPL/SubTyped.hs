@@ -23,28 +23,29 @@ data NamedTerm =
   | TmApp NamedTerm NamedTerm
   | TmRecord (M.Map String NamedTerm)
   | TmProj NamedTerm String
-  deriving (Show)
+  deriving (Show, Eq)
 data UnNamedTerm = 
     TmVar' DeBrujinIndex
   | TmAbs' String Ty UnNamedTerm
   | TmApp' UnNamedTerm UnNamedTerm
   | TmRecord' (M.Map String UnNamedTerm)
   | TmProj' UnNamedTerm String
-  deriving (Show)
+  deriving (Show, Eq)
 type NamingContext = [(String, Binding)]
-data Binding = NamedBind | VarBind Ty deriving Show
+data Binding = NamedBind | VarBind Ty deriving (Show, Eq)
 data Errors = 
     RemoveNamesError RemoveNamesError 
   | TypingError TypingError
   | EvalError EvalError 
-  deriving Show
-data RemoveNamesError = MissingVariableInNamingContext String NamingContext
+  deriving (Show, Eq)
+data RemoveNamesError = MissingVariableInNamingContext String NamingContext deriving (Eq)
 data TypingError = 
     MissingTypeInNamingContext String 
   | NotMatchedTypeTmApp UnNamedTerm Ty UnNamedTerm Ty
   | NotMatchedTypeTyProjLabelMissing String (M.Map String Ty)
   | NotMatchedTypeTyProjNotRecord
-data EvalError = NoRuleApplies deriving Show
+  deriving (Eq)
+data EvalError = NoRuleApplies deriving (Show, Eq)
 
 instance Show RemoveNamesError where
   show (MissingVariableInNamingContext x ctx) = concat ["missing variable in naming context: variable: ", x, ", NamingContext: ", show ctx]
@@ -161,9 +162,14 @@ termSubst j s (TmProj' t label) = TmProj' (termSubst j s t) label
 betaReduction :: UnNamedTerm -> UnNamedTerm -> UnNamedTerm
 betaReduction s t = termShift (-1) $ termSubst 0 (termShift 1 s) t
 
+isVal :: UnNamedTerm -> Bool
+isVal (TmAbs' _ _ _) = True
+isVal (TmRecord' _) = True
+isVal _ = False 
+
 eval1 :: UnNamedTerm -> Eff '[EitherDef Errors] UnNamedTerm
-eval1 (TmApp' (TmAbs' _ _ t1) v2@(TmAbs' _ _ _)) = return $ betaReduction v2 t1
-eval1 (TmApp' v1@(TmAbs' _ _ _) t2) = TmApp' v1 <$> eval1 t2
+eval1 (TmApp' (TmAbs' _ _ t1) v2) | isVal v2 = return $ betaReduction v2 t1
+eval1 (TmApp' v1 t2) | isVal v1 = TmApp' v1 <$> eval1 t2
 eval1 (TmApp' t1 t2) = (`TmApp'` t2) <$> eval1 t1
 eval1 (TmRecord' fields) = TmRecord' . M.fromList <$> eval1Record (M.toList fields)
   where
