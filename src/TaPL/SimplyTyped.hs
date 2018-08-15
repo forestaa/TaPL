@@ -23,7 +23,7 @@ data NamedTerm =
   | TmTrue
   | TmFalse
   | TmIf NamedTerm NamedTerm NamedTerm
-  deriving (Show)
+  deriving (Show, Eq)
 data UnNamedTerm = 
     TmVar' DeBrujinIndex
   | TmAbs' String Ty UnNamedTerm
@@ -31,21 +31,22 @@ data UnNamedTerm =
   | TmTrue'
   | TmFalse'
   | TmIf' UnNamedTerm UnNamedTerm UnNamedTerm
-  deriving (Show)
+  deriving (Show, Eq)
 type NamingContext = [(String, Binding)]
-data Binding = NamedBind | VarBind Ty deriving Show
+data Binding = NamedBind | VarBind Ty deriving (Show, Eq)
 data Errors = 
     RemoveNamesError RemoveNamesError 
   | TypingError TypingError
   | EvalError EvalError 
-  deriving Show
-data RemoveNamesError = MissingVariableInNamingContext String NamingContext
+  deriving (Show, Eq)
+data RemoveNamesError = MissingVariableInNamingContext String NamingContext deriving (Eq)
 data TypingError = 
     MissingTypeInNamingContext String 
   | NotMatchedTypeTmApp UnNamedTerm Ty UnNamedTerm Ty
   | NotMatchedTypeTmIfT1 UnNamedTerm Ty
   | NotMatchedTypeTmIfT2T3 UnNamedTerm Ty UnNamedTerm Ty
-data EvalError = NoRuleApplies deriving Show
+  deriving (Eq)
+data EvalError = NoRuleApplies deriving (Show, Eq)
 
 instance Show RemoveNamesError where
   show (MissingVariableInNamingContext x ctx) = concat ["missing variable in naming context: variable: ", x, ", NamingContext: ", show ctx]
@@ -155,9 +156,15 @@ termSubst j s (TmIf' t1 t2 t3) = TmIf' (termSubst j s t1) (termSubst j s t2) (te
 betaReduction :: UnNamedTerm -> UnNamedTerm -> UnNamedTerm
 betaReduction s t = termShift (-1) $ termSubst 0 (termShift 1 s) t
 
+isVal :: UnNamedTerm -> Bool
+isVal (TmAbs' _ _ _) = True
+isVal TmTrue' = True
+isVal TmFalse' = True
+isVal _ = False 
+
 eval1 :: UnNamedTerm -> Eff '[EitherDef Errors] UnNamedTerm
-eval1 (TmApp' (TmAbs' _ _ t1) v2@(TmAbs' _ _ _)) = return $ betaReduction v2 t1
-eval1 (TmApp' v1@(TmAbs' _ _ _) t2) = TmApp' v1 <$> eval1 t2
+eval1 (TmApp' (TmAbs' _ _ t1) v2) | isVal v2 = return $ betaReduction v2 t1
+eval1 (TmApp' v1 t2) | isVal v1 = TmApp' v1 <$> eval1 t2
 eval1 (TmApp' t1 t2) = (`TmApp'` t2) <$> eval1 t1
 eval1 (TmIf' TmTrue' t2 _) = return t2
 eval1 (TmIf' TmFalse' _ t3) = return t3
