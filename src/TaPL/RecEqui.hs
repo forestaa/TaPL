@@ -2,10 +2,12 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedLabels #-}
+{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeFamilies     #-}
 {-# LANGUAGE TypeOperators    #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE UndecidableInstances #-}
+
 
 module TaPL.RecEqui where
 
@@ -21,6 +23,7 @@ import Control.Lens hiding ((:>))
 import Data.Extensible
 import Data.Extensible.Effect.Default
 
+import Debug.Trace
 
 
 type DeBrujinIndex = Int
@@ -37,14 +40,18 @@ type family Named (a :: A) (b :: Bool) where
   Named 'TERM  'True  = NamedTerm
   Named 'TERM  'False = UnNamedTerm
 
+type Effect a = Eff '[StateDef NamingContext, EitherDef Errors] a
+run :: NamingContext -> Effect a -> Either Errors a
+run ctx = leaveEff . runEitherDef . flip evalStateDef ctx
+
 class UnName (f :: Bool -> *) where
-  unName :: f 'True -> Eff '[StateDef NamingContext, EitherDef Errors] (f 'False)
+  unName :: f 'True -> Effect (f 'False)
 
 data family Type (a :: Bool)
 newtype instance Type a = Type (Variant '["primitive" >: SString, "variable" >: VariableType a, "arrow" >: ArrowType a, "recursion" >: RecursionType a ])
-newtype VariableType a = VariableType (Record '[ "id" :> Named 'INDEX a ]) 
+newtype VariableType a = VariableType (Record '[ "id" :> Named 'INDEX a ])
 newtype ArrowType a = ArrowType (Record '[ "domain" >: Named 'TYPE a, "codomain" >: Named 'TYPE a ])
-newtype RecursionType a = RecursionType (Record '[ "name" >: SString, "body" >: Named 'TYPE a ]) 
+newtype RecursionType a = RecursionType (Record '[ "name" >: SString, "body" >: Named 'TYPE a ])
 type NamedType = Type 'True
 type UnNamedType = Type 'False
 
@@ -57,15 +64,23 @@ type NamedTerm = Term 'True
 type UnNamedTerm = Term 'False
 
 type NamingContext = [(SString, Binding)]
-data Binding = NameBind | VariableBind NamedType | TypeVariableBind deriving (Show)
+data Binding = NameBind | VariableBind NamedType | TypeVariableBind deriving (Show, Eq)
 type Errors = Variant '[ "removeNamesError" >: RemoveNamesError ]
-newtype RemoveNamesError = RemoveNamesError (Variant '["missingVariableInNamingContext" >: Record '["name" :> SString, "namingContext" :> NamingContext] ])
+newtype RemoveNamesError = RemoveNamesError (Variant '["missingVariableInNamingContext" >: Record '["name" :> SString, "namingContext" :> NamingContext] ]) deriving (Eq)
 
+deriving instance (Eq (Named 'TYPE a), Eq (Named 'INDEX a)) => Eq (Type a)
+deriving instance (Eq (Named 'INDEX a)) => Eq (VariableType a)
+deriving instance (Eq (Named 'TYPE a), Eq (Named 'INDEX a)) => Eq (ArrowType a)
+deriving instance (Eq (Named 'TYPE a), Eq (Named 'INDEX a)) => Eq (RecursionType a)
+deriving instance (Eq (Named 'TERM a), Eq (Named 'TYPE a), Eq (Named 'INDEX a)) => Eq (Term a)
+deriving instance (Eq (Named 'INDEX a)) => Eq (VariableTerm a)
+deriving instance (Eq (Named 'TERM a), Eq (Named 'TYPE a)) => Eq (AbstractionTerm a)
+deriving instance Eq (Named 'TERM a) => Eq (ApplicationTerm a)
 
 instance (Show (Named 'INDEX a), Show (Named 'TYPE a)) => Show (Type a) where
   show (Type ty) = flip matchField ty $
-    htabulateFor (Proxy :: Proxy (KeyValue KnownSymbol Show)) $
-      \_ -> Field (Match $ show . runIdentity)
+    hrepeatFor (Proxy :: Proxy (KeyValue KnownSymbol Show)) $
+      Field (Match $ show . runIdentity)
 instance Show (Named 'INDEX a) => Show (VariableType a) where
   show (VariableType ty) = show (ty ^. #id)
 instance Show (Named 'TYPE a) => Show (ArrowType a) where
@@ -74,9 +89,9 @@ instance (Show (Named 'INDEX a), Show (Named 'TYPE a)) => Show (RecursionType a)
   show (RecursionType ty) = "(μ" ++ show (ty ^. #name) ++ "." ++ show (ty ^. #body) ++ ")"
 
 instance (Show (Named 'INDEX a), Show (Named 'TYPE a), Show (Named 'TERM a)) => Show (Term a) where
-  show (Term term) = flip matchField term $
-    htabulateFor (Proxy :: Proxy (KeyValue KnownSymbol Show)) $
-        \_ -> Field (Match $ show . runIdentity)
+  show (Term term) = flip matchField term $ 
+    hrepeatFor (Proxy :: Proxy (KeyValue KnownSymbol Show)) $ 
+      Field (Match $ show . runIdentity)
 instance Show (Named 'INDEX a) => Show (VariableTerm a) where
   show (VariableTerm t) = show (t ^. #id)
 instance (Show (Named 'TYPE a), Show (Named 'TERM a)) => Show (AbstractionTerm a) where
@@ -100,12 +115,15 @@ instance UnName Type where
     <: nil
 instance UnName VariableType where
   unName (VariableType ty) = do
-    maybei <- gets (L.findIndex ((==) (ty ^. #id) . (^. _1)))
+    maybei <- gets (L.findIndex isBound)
     case maybei of
       Just i  -> return . VariableType $ #id @= i <: nil
       Nothing -> do
         ctx <- get
         throwError $ #removeNamesError # RemoveNamesError (#missingVariableInNamingContext # (#name @= ty ^. #id <: #namingContext @= ctx <: nil))
+    where
+      isBound (x, TypeVariableBind) | x == ty ^. #id = True
+      isBound _ = False
 instance UnName ArrowType where
   unName (ArrowType ty) = do
     domain <- unName $ ty ^. #domain
@@ -113,10 +131,9 @@ instance UnName ArrowType where
     return . ArrowType $ #domain @= domain <: #codomain @= codomain <: nil
 instance UnName RecursionType where
   unName (RecursionType ty) = do
-    ctx <- get
     let x  = ty ^. #name
         body = ty ^. #body
-    modify ((:) (x, TypeVariableBind))
+    ctx <- modify ((:) (x, TypeVariableBind)) >> get
     body' <- castEff $ evalStateDef (unName body) ctx
     return . RecursionType $ #name @= x <: #body @= body' <: nil
 
@@ -128,20 +145,24 @@ instance UnName Term where
     <: nil
 instance UnName VariableTerm where
   unName (VariableTerm t) = do
-    maybei <- gets (L.findIndex ((==) (t ^. #id) . (^. _1)))
+    maybei <- gets (L.findIndex isBound)
     case maybei of
       Just i  -> return . VariableTerm $ #id @= i <: nil
       Nothing -> do
         ctx <- get
         throwError $ #removeNamesError # RemoveNamesError (#missingVariableInNamingContext # (#name @= t ^. #id <: #namingContext @= ctx <: nil))
+    where
+      isBound (x, VariableBind _) | x == t ^. #id = True
+      isBound _ = False
+
 instance UnName AbstractionTerm where
   unName (AbstractionTerm t) = do
-    ctx <- get
     let x  = t ^. #name
         ty = t ^. #type
-    modify ((:) (x, VariableBind ty))
+    ctx <- get
+    newctx <- modify ((:) (x, VariableBind ty)) >> get
     ty' <- castEff $ evalStateDef (unName ty) ctx
-    t' <- castEff $ evalStateDef (unName $ t ^. #body) ctx
+    t' <- castEff $ evalStateDef (unName $ t ^. #body) newctx
     return . AbstractionTerm $ #name @= x <: #type @= ty' <: #body @= t' <: nil
 instance UnName ApplicationTerm where
   unName (ApplicationTerm t) = do
