@@ -48,4 +48,18 @@ spec = do
           ty' = Type (#primitive # SString "X") :: UnNamedType
           t'' = Term (#variable # VariableTerm (#id @= 0 <: nil)) :: UnNamedTerm
           expected = Term $ #abstraction # AbstractionTerm (#name @= SString "x" <: #type @= ty' <: #body @= t'' <: nil) :: UnNamedTerm
-      run [] (unName t') `shouldBe` Right expected
+      run [] (unName t') `shouldBe` Right expected  
+  describe "restoreName" $ do
+    it "μX.X" $ do
+      let ty = Type (#variable # VariableType (#id @= 0 <: nil)) :: UnNamedType
+          ty' = Type (#recursion # RecursionType (#name @= SString "X" <: #body @= ty <: nil)) :: UnNamedType
+          expected = Type (#recursion # RecursionType (#name @= SString "X" <: #body @= Type (#variable # VariableType (#id @= SString "X" <: nil)) <: nil)) :: NamedType
+      run [] (restoreName ty') `shouldBe` Right expected
+    it "λx:X.x" $ do
+      let t = Term (#variable # VariableTerm (#id @= 0 <: nil)) :: UnNamedTerm
+          ty = Type (#primitive # SString "X") :: UnNamedType
+          t' = Term (#abstraction # AbstractionTerm (#name @= SString "x" <: #type @= ty <: #body @= t <: nil)) :: UnNamedTerm
+          ty' = Type (#primitive # SString "X") :: NamedType
+          t'' = Term (#variable # VariableTerm (#id @= SString "x" <: nil)) :: NamedTerm
+          expected = Term $ #abstraction # AbstractionTerm (#name @= SString "x" <: #type @= ty' <: #body @= t'' <: nil) :: NamedTerm
+      run [] (restoreName t') `shouldBe` Right expected

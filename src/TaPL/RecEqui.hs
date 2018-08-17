@@ -45,7 +45,8 @@ run :: NamingContext -> Effect a -> Either Errors a
 run ctx = leaveEff . runEitherDef . flip evalStateDef ctx
 
 class UnName (f :: Bool -> *) where
-  unName :: f 'True -> Effect (f 'False)
+  unName      :: f 'True -> Effect (f 'False)
+  restoreName :: f 'False -> Effect (f 'True)
 
 data family Type (a :: Bool)
 newtype instance Type a = Type (Variant '["primitive" >: SString, "variable" >: VariableType a, "arrow" >: ArrowType a, "recursion" >: RecursionType a ])
@@ -113,6 +114,12 @@ instance UnName Type where
     <: #arrow     @= fmap (Type . (#) #arrow)     . unName
     <: #recursion @= fmap (Type . (#) #recursion) . unName
     <: nil
+  restoreName (Type ty) = flip matchField ty $
+       #primitive @= return . Type . (#) #primitive
+    <: #variable @= fmap (Type . (#) #variable)  . restoreName
+    <: #arrow @= fmap (Type . (#) #arrow)        . restoreName
+    <: #recursion @= fmap (Type . (#) #recursion) . restoreName
+    <: nil
 instance UnName VariableType where
   unName (VariableType ty) = do
     maybei <- gets (L.findIndex isBound)
@@ -124,10 +131,17 @@ instance UnName VariableType where
     where
       isBound (x, TypeVariableBind) | x == ty ^. #id = True
       isBound _ = False
+  restoreName (VariableType ty) = do
+    ctx <- get
+    return . VariableType $ #id @= (ctx !! (ty ^. #id)) ^. _1 <: nil
 instance UnName ArrowType where
   unName (ArrowType ty) = do
     domain <- unName $ ty ^. #domain
     codomain <- unName $ ty ^. #codomain
+    return . ArrowType $ #domain @= domain <: #codomain @= codomain <: nil
+  restoreName (ArrowType ty) = do
+    domain <- restoreName $ ty ^. #domain
+    codomain <- restoreName $ ty ^. #codomain
     return . ArrowType $ #domain @= domain <: #codomain @= codomain <: nil
 instance UnName RecursionType where
   unName (RecursionType ty) = do
@@ -136,12 +150,23 @@ instance UnName RecursionType where
     ctx <- modify ((:) (x, TypeVariableBind)) >> get
     body' <- castEff $ evalStateDef (unName body) ctx
     return . RecursionType $ #name @= x <: #body @= body' <: nil
+  restoreName (RecursionType ty) = do
+    let x  = ty ^. #name
+        body = ty ^. #body
+    ctx <- modify ((:) (x, TypeVariableBind)) >> get
+    body' <- castEff $ evalStateDef (restoreName body) ctx
+    return . RecursionType $ #name @= x <: #body @= body' <: nil
 
 instance UnName Term where
-  unName (Term term) = flip matchField term $
+  unName (Term t) = flip matchField t $
        #variable    @= fmap (Term . (#) #variable)    . unName
     <: #abstraction @= fmap (Term . (#) #abstraction) . unName
     <: #application @= fmap (Term . (#) #application) . unName
+    <: nil
+  restoreName (Term t) = flip matchField t $
+       #variable    @= fmap (Term . (#) #variable)    . restoreName
+    <: #abstraction @= fmap (Term . (#) #abstraction) . restoreName
+    <: #application @= fmap (Term . (#) #application) . restoreName
     <: nil
 instance UnName VariableTerm where
   unName (VariableTerm t) = do
@@ -154,7 +179,9 @@ instance UnName VariableTerm where
     where
       isBound (x, VariableBind _) | x == t ^. #id = True
       isBound _ = False
-
+  restoreName (VariableTerm t) = do
+    ctx <- get 
+    return $ VariableTerm $ #id @= (ctx !! (t ^. #id)) ^. _1 <: nil
 instance UnName AbstractionTerm where
   unName (AbstractionTerm t) = do
     let x  = t ^. #name
@@ -164,9 +191,24 @@ instance UnName AbstractionTerm where
     ty' <- castEff $ evalStateDef (unName ty) ctx
     t' <- castEff $ evalStateDef (unName $ t ^. #body) newctx
     return . AbstractionTerm $ #name @= x <: #type @= ty' <: #body @= t' <: nil
+  restoreName (AbstractionTerm t) = do
+    let x  = t ^. #name
+        ty = t ^. #type
+    ctx <- get
+    ty' <- castEff $ evalStateDef (restoreName ty) ctx
+    newctx <- modify ((:) (x, VariableBind ty')) >> get
+    t' <- castEff $ evalStateDef (restoreName $ t ^. #body) newctx
+    return . AbstractionTerm $ #name @= x <: #type @= ty' <: #body @= t' <: nil
 instance UnName ApplicationTerm where
   unName (ApplicationTerm t) = do
     ctx <- get
     t1 <- castEff $ evalStateDef (unName $ t ^. #function) ctx
     t2 <- castEff $ evalStateDef (unName $ t ^. #argument) ctx
     return . ApplicationTerm $ #function @= t1 <: #argument @= t2 <: nil
+  restoreName (ApplicationTerm t) = do
+    ctx <- get
+    t1 <- castEff $ evalStateDef (restoreName $ t ^. #function) ctx
+    t2 <- castEff $ evalStateDef (restoreName $ t ^. #argument) ctx
+    return . ApplicationTerm $ #function @= t1 <: #argument @= t2 <: nil
+
+-- typeOf :: UnNamedTerm -> Effect UnNamedType
