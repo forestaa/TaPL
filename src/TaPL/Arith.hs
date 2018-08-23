@@ -1,5 +1,7 @@
 module TaPL.Arith where
 
+import RIO
+
 data Ty = TyBool | TyNat deriving (Show, Eq)
 data Term = TmTrue | TmFalse | TmIf Term Term Term | TmZero | TmSucc Term | TmPred Term | TmIsZero Term deriving (Show, Eq)
 

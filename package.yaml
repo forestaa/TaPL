@@ -25,12 +25,24 @@ dependencies:
 - extensible
 - lens
 - mtl
+- rio
+
+default-extensions:
+- NoImplicitPrelude
+- OverloadedStrings
 
 library:
   source-dirs: src
+  ghc-options:
+  - -Wall
+  - -Wcompat
+  - -Wincomplete-record-updates
+  - -Wincomplete-uni-patterns
+  - -Wredundant-constraints
+  - -fno-warn-unticked-promoted-constructors
 
 executables:
-  TAPL-exe:
+  TaPL-exe:
     main:                Main.hs
     source-dirs:         app
     ghc-options:
@@ -41,9 +53,11 @@ executables:
     - TaPL
 
 tests:
-  TAPL-test:
+  TaPL-test:
     main:                Spec.hs
     source-dirs:         test
+    default-extensions:
+    - OverloadedLists
     ghc-options:
     - -threaded
     - -rtsopts

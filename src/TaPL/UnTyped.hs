@@ -2,48 +2,50 @@
 
 module TaPL.UnTyped where
 
+import RIO
+import qualified RIO.Set as Set
+import qualified RIO.Vector as V
+
 import Control.Monad.Error.Class
 import Control.Monad.State.Strict
 
 import Data.Extensible.Effect
 import Data.Extensible.Effect.Default
-import qualified Data.Set as S
-import qualified Data.List as L
 
 type DeBrujinIndex = Int
 data NamedTerm = TmVar String | TmAbs String NamedTerm | TmApp NamedTerm NamedTerm deriving (Show)
 data UnNamedTerm = TmVar' DeBrujinIndex | TmAbs' String UnNamedTerm | TmApp' UnNamedTerm UnNamedTerm deriving (Show)
-type NamingContext = [String]
+type NamingContext = Vector String
 
-freeVariable :: NamedTerm -> S.Set String
-freeVariable = leaveEff . (`evalStateDef` S.empty) . freeVariable'
+freeVariable :: NamedTerm -> Set.Set String
+freeVariable = leaveEff . (`evalStateDef` Set.empty) . freeVariable'
 
-freeVariable' :: NamedTerm -> Eff '[StateDef (S.Set String)] (S.Set String)
+freeVariable' :: NamedTerm -> Eff '[StateDef (Set.Set String)] (Set.Set String)
 freeVariable' (TmVar x) = do
-  b <- gets (S.member x)
+  b <- gets (Set.member x)
   if b
-    then return S.empty 
-    else return $ S.singleton x 
-freeVariable' (TmAbs x t) = modify (S.insert x) >> freeVariable' t
+    then return Set.empty 
+    else return $ Set.singleton x 
+freeVariable' (TmAbs x t) = modify (Set.insert x) >> freeVariable' t
 freeVariable' (TmApp t1 t2) = do
   bounds <- get
   vs1 <- castEff $ evalStateDef (freeVariable' t1) bounds
   vs2 <- castEff $ evalStateDef (freeVariable' t2) bounds
-  return $ S.union vs1 vs2
+  return $ Set.union vs1 vs2
 
 removeNames :: NamedTerm -> Either String UnNamedTerm
-removeNames t = removeNamesWithContext (S.toList $ freeVariable t) t
+removeNames t = removeNamesWithContext (V.fromList . Set.toList $ freeVariable t) t
 
 removeNamesWithContext :: NamingContext -> NamedTerm -> Either String UnNamedTerm
 removeNamesWithContext ctx = leaveEff . runEitherDef . (`evalStateDef` ctx) . removeNamesWithContext'
 
 removeNamesWithContext' :: NamedTerm -> Eff '[StateDef NamingContext, EitherDef String] UnNamedTerm
 removeNamesWithContext' (TmVar x) = do
-  maybei <- gets (L.elemIndex x)
+  maybei <- gets (V.elemIndex x)
   case maybei of
     Just i -> return $ TmVar' i
     Nothing -> throwError $ "missing " ++ x
-removeNamesWithContext' (TmAbs x t) = modify ((:) x) >> fmap (TmAbs' x) (removeNamesWithContext' t)
+removeNamesWithContext' (TmAbs x t) = modify (V.cons x) >> fmap (TmAbs' x) (removeNamesWithContext' t)
 removeNamesWithContext' (TmApp t1 t2) = do
   ctx <- get
   t1' <- castEff $ evalStateDef (removeNamesWithContext' t1) ctx
@@ -54,8 +56,12 @@ restoreNamesWithContext :: NamingContext -> UnNamedTerm -> Either String NamedTe
 restoreNamesWithContext ctx = leaveEff . runEitherDef . (`evalStateDef` ctx) . restoreNamesWithContext'
 
 restoreNamesWithContext' :: UnNamedTerm -> Eff '[StateDef NamingContext, EitherDef String] NamedTerm
-restoreNamesWithContext' (TmVar' n) = gets (TmVar . (!! n))
-restoreNamesWithContext' (TmAbs' x t) = modify ((:) x) >> fmap (TmAbs x) (restoreNamesWithContext' t)
+restoreNamesWithContext' (TmVar' n) = do
+  ctx <- get
+  case ctx V.!? n of
+    Just name -> return $ TmVar name
+    Nothing -> throwError $ concat ["invalid index: index: ", show n, ", NamingContextt: ", show ctx]
+restoreNamesWithContext' (TmAbs' x t) = modify (V.cons x) >> fmap (TmAbs x) (restoreNamesWithContext' t)
 restoreNamesWithContext' (TmApp' t1 t2) = do
   ctx <- get
   t1' <- castEff $ evalStateDef (restoreNamesWithContext' t1) ctx
@@ -73,7 +79,7 @@ termShift d = walk 0
 termSubst :: DeBrujinIndex -> UnNamedTerm -> UnNamedTerm -> UnNamedTerm
 termSubst j s (TmVar' n) | n == j    = s
                          | otherwise = TmVar' n
-termSubst j s (TmAbs' x t) = TmAbs' x $ termSubst (succ j) (termShift 1 s) t
+termSubst j s (TmAbs' x t) = TmAbs' x $ termSubst (j + 1) (termShift 1 s) t
 termSubst j s (TmApp' t1 t2) = TmApp' (termSubst j s t1) (termSubst j s t2)
 
 betaReduction :: UnNamedTerm -> UnNamedTerm -> UnNamedTerm
@@ -97,6 +103,6 @@ eval' t = case eval1 t of
 
 eval :: NamedTerm -> Either String NamedTerm
 eval t = do
-  let fv = S.toList $ freeVariable t
+  let fv = V.fromList . Set.toList $ freeVariable t
   t' <- removeNamesWithContext fv t
   restoreNamesWithContext fv (eval' t')

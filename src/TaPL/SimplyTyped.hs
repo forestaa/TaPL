@@ -3,14 +3,15 @@
 
 module TaPL.SimplyTyped where
 
-import Control.Lens
+import RIO
+import qualified RIO.Vector as V
+
+import Control.Lens hiding ((^.))
 import Control.Monad.Error.Class
 import Control.Monad.State.Strict
 
 import Data.Extensible.Effect
 import Data.Extensible.Effect.Default
-import qualified Data.Set as S
-import qualified Data.List as L
 
 
 data Ty = TyArrow Ty Ty | TyBool deriving (Show, Eq)
@@ -32,14 +33,16 @@ data UnNamedTerm =
   | TmFalse'
   | TmIf' UnNamedTerm UnNamedTerm UnNamedTerm
   deriving (Show, Eq)
-type NamingContext = [(String, Binding)]
+type NamingContext = Vector (String, Binding)
 data Binding = NamedBind | VarBind Ty deriving (Show, Eq)
 data Errors = 
     RemoveNamesError RemoveNamesError 
+  | RestoreNamesError RestoreNamesError
   | TypingError TypingError
   | EvalError EvalError 
   deriving (Show, Eq)
-data RemoveNamesError = MissingVariableInNamingContext String NamingContext deriving (Eq)
+data RemoveNamesError = MissingVariableInNamingContextInRemoving String NamingContext deriving (Eq)
+data RestoreNamesError = MissingVariableInNamingContextInRestoring DeBrujinIndex NamingContext deriving (Eq)
 data TypingError = 
     MissingTypeInNamingContext String 
   | NotMatchedTypeTmApp UnNamedTerm Ty UnNamedTerm Ty
@@ -49,7 +52,9 @@ data TypingError =
 data EvalError = NoRuleApplies deriving (Show, Eq)
 
 instance Show RemoveNamesError where
-  show (MissingVariableInNamingContext x ctx) = concat ["missing variable in naming context: variable: ", x, ", NamingContext: ", show ctx]
+  show (MissingVariableInNamingContextInRemoving x ctx) = concat ["missing variable in naming context: variable: ", x, ", NamingContext: ", show ctx]
+instance Show RestoreNamesError where
+  show (MissingVariableInNamingContextInRestoring x ctx) = concat ["missing variable in naming context: variable: ", show x, ", NamingContext: ", show ctx]
 instance Show TypingError where
   show (MissingTypeInNamingContext x) = concat ["missing type in naming context: ", x]
   show (NotMatchedTypeTmApp t1 ty1 t2 ty2) = concat ["doesn't matched type: application: t1 = ", show t1, ", ty1 = ", show ty1, ", t2 = ", show t2, ", ty2 = ", show ty2]
@@ -62,11 +67,11 @@ removeNamesWithContext ctx = (`evalStateDef` ctx) . removeNamesWithContext'
 
 removeNamesWithContext' :: NamedTerm -> Eff '[StateDef NamingContext, EitherDef Errors] UnNamedTerm
 removeNamesWithContext' (TmVar x) = do
-  maybei <- gets (L.findIndex ((==) x . (^. _1)))
+  maybei <- gets (V.findIndex ((==) x . (^. _1)))
   case maybei of
     Just i -> return $ TmVar' i
-    Nothing -> get >>= throwError . RemoveNamesError . MissingVariableInNamingContext x
-removeNamesWithContext' (TmAbs x ty t) = modify ((:) (x, VarBind ty)) >> fmap (TmAbs' x ty) (removeNamesWithContext' t)
+    Nothing -> get >>= throwError . RemoveNamesError . MissingVariableInNamingContextInRemoving x
+removeNamesWithContext' (TmAbs x ty t) = modify (V.cons (x, VarBind ty)) >> fmap (TmAbs' x ty) (removeNamesWithContext' t)
 removeNamesWithContext' (TmApp t1 t2) = do
   ctx <- get
   t1' <- castEff $ evalStateDef (removeNamesWithContext' t1) ctx
@@ -81,12 +86,16 @@ removeNamesWithContext' (TmIf t1 t2 t3) = do
   t3' <- castEff $ evalStateDef (removeNamesWithContext' t3) ctx
   return $ TmIf' t1' t2' t3'
 
-restoreNamesWithContext :: NamingContext -> UnNamedTerm -> NamedTerm
-restoreNamesWithContext ctx = leaveEff . (`evalStateDef` ctx) . restoreNamesWithContext'
+restoreNamesWithContext :: NamingContext -> UnNamedTerm -> Eff '[EitherDef Errors] NamedTerm
+restoreNamesWithContext ctx = (`evalStateDef` ctx) . restoreNamesWithContext'
 
-restoreNamesWithContext' :: UnNamedTerm -> Eff '[StateDef NamingContext] NamedTerm
-restoreNamesWithContext' (TmVar' n) = gets (TmVar . (^. _1) . (!! n))
-restoreNamesWithContext' (TmAbs' x ty t) = modify ((:) (x, VarBind ty)) >> fmap (TmAbs x ty) (restoreNamesWithContext' t)
+restoreNamesWithContext' :: UnNamedTerm -> Eff '[StateDef NamingContext, EitherDef Errors] NamedTerm
+restoreNamesWithContext' (TmVar' n) = do
+  ctx <- get
+  case ctx V.!? n of
+    Just (name, _) -> return $ TmVar name
+    Nothing -> throwError . RestoreNamesError $ MissingVariableInNamingContextInRestoring n ctx
+restoreNamesWithContext' (TmAbs' x ty t) = modify (V.cons (x, VarBind ty)) >> fmap (TmAbs x ty) (restoreNamesWithContext' t)
 restoreNamesWithContext' (TmApp' t1 t2) = do
   ctx <- get
   t1' <- castEff $ evalStateDef (restoreNamesWithContext' t1) ctx
@@ -106,11 +115,11 @@ typeOf ctx = (`evalStateDef` ctx) . typeOf'
 
 typeOf' :: UnNamedTerm -> Eff [StateDef NamingContext, EitherDef Errors] Ty
 typeOf' (TmVar' n) = do
-  binding <- gets ((^. _2) . (!! n))
-  case binding of
-    VarBind ty -> return ty
-    _ -> gets ((^. _1) . (!! n)) >>= throwError . TypingError . MissingTypeInNamingContext 
-typeOf' (TmAbs' x ty t) = modify ((:) (x, VarBind ty)) >> fmap (TyArrow ty) (typeOf' t)
+  ctx <- get
+  case ctx V.!? n of
+    Just (_, VarBind ty) -> return ty
+    _ -> throwError . TypingError $ MissingTypeInNamingContext (show n)
+typeOf' (TmAbs' x ty t) = modify (V.cons (x, VarBind ty)) >> fmap (TyArrow ty) (typeOf' t)
 typeOf' (TmApp' t1 t2) = do
   ctx <- get
   ty1 <- castEff $ evalStateDef (typeOf' t1) ctx
@@ -147,7 +156,7 @@ termShift d = walk 0
 termSubst :: DeBrujinIndex -> UnNamedTerm -> UnNamedTerm -> UnNamedTerm
 termSubst j s (TmVar' n) | n == j    = s
                          | otherwise = TmVar' n
-termSubst j s (TmAbs' x ty t) = TmAbs' x ty $ termSubst (succ j) (termShift 1 s) t
+termSubst j s (TmAbs' x ty t) = TmAbs' x ty $ termSubst (j + 1) (termShift 1 s) t
 termSubst j s (TmApp' t1 t2) = TmApp' (termSubst j s t1) (termSubst j s t2)
 termSubst _ _ TmTrue' = TmTrue'
 termSubst _ _ TmFalse' = TmFalse'
@@ -186,5 +195,5 @@ eval ctx t = leaveEff $ runEitherDef ret
       t1 <- removeNamesWithContext ctx t
       ty <- typeOf ctx t1
       t2 <- eval' t1
-      let t3 = restoreNamesWithContext ctx t2
+      t3 <- restoreNamesWithContext ctx t2
       return (t3, ty)
