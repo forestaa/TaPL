@@ -1,7 +1,6 @@
 {-# LANGUAGE DataKinds        #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE OverloadedLabels #-}
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeFamilies     #-}
@@ -15,7 +14,6 @@ module TaPL.RecEqui where
 
 import RIO
 import qualified RIO.Set as Set
-import qualified RIO.Text as Text
 import qualified RIO.Vector as V
 
 import Control.Monad.Error.Class
@@ -25,39 +23,20 @@ import Control.Lens hiding ((:>), (^.))
 import Data.Extensible
 import Data.Extensible.Effect.Default
 
--- mapError :: Associate k (EitherEff e') ys => Proxy k -> (e -> e') -> Eff ((s >: EitherEff e) ': xs) a -> Eff ys a
--- mapError k f m = do
---   ret <- castEff $ runEitherEff m
---   case ret of
---     Right a -> return a
---     Left e -> throwEff k $ f e
+import SString
 
--- hoge :: Eff '[EitherDef Int] a -> Eff '[EitherDef String] a
--- hoge = mapError (Proxy :: Proxy "Either") show
--- mapError :: (e -> e') -> Eff (EitherDef e ': xs) a -> Eff (EitherDef e' ': xs) a 
 mapError :: (e -> e') -> Eff '[EitherDef e] a -> Eff '[EitherDef e'] a 
 mapError f m = do
   ret <- castEff $ runEitherDef m
   case ret of
     Right a -> return a
-    -- Left e -> throwEff (Proxy :: Proxy "Either") $ f e
     Left e -> throwError $ f e
--- mapError k f m = throwEff k 1
-
 
 type DeBrujinIndex = Int
-newtype SString = SString Text.Text deriving (Eq, Ord, IsString)
-instance Show SString where
-  show (SString s) = Text.unpack s
 
-data A = INDEX | TYPE |TERM
-type family Named (a :: A) (b :: Bool) where
-  Named 'INDEX 'True  = SString
-  Named 'INDEX 'False = DeBrujinIndex
-  Named 'TYPE  'True  = NamedType
-  Named 'TYPE  'False = UnNamedType
-  Named 'TERM  'True  = NamedTerm
-  Named 'TERM  'False = UnNamedTerm
+type family Named (a :: Bool) where
+  Named 'True  = SString
+  Named 'False = DeBrujinIndex
 
 leaveEitherDef :: Eff '[EitherDef e] a -> Either e a
 leaveEitherDef = leaveEff . runEitherDef
@@ -72,17 +51,17 @@ class UnName (f :: Bool -> *) where
 
 data Type a = 
     PrimitiveType SString
-  | VariableType (Record '[ "id" :> Named 'INDEX a ])
-  | ArrowType (Record '[ "domain" >: Named 'TYPE a, "codomain" >: Named 'TYPE a ])
-  | RecursionType (Record '[ "name" >: SString, "body" >: Named 'TYPE a ])
+  | VariableType (Record '[ "id" :> Named a ])
+  | ArrowType (Record '[ "domain" >: Type a, "codomain" >: Type a ])
+  | RecursionType (Record '[ "name" >: SString, "body" >: Type a ])
 type NamedType = Type 'True
 type UnNamedType = Type 'False
 
 data Term a =
     ConstTerm SString
-  | VariableTerm (Record '[ "id" :> Named 'INDEX a ])
-  | AbstractionTerm (Record '[ "name" :> SString, "type" :> Named 'TYPE a, "body" :> Named 'TERM a ])
-  | ApplicationTerm (Record '[ "function" :> Named 'TERM a, "argument" :> Named 'TERM a ])
+  | VariableTerm (Record '[ "id" :> Named a ])
+  | AbstractionTerm (Record '[ "name" :> SString, "type" :> Type a, "body" :> Term a ])
+  | ApplicationTerm (Record '[ "function" :> Term a, "argument" :> Term a ])
 type NamedTerm = Term 'True
 type UnNamedTerm = Term 'False
 
@@ -96,8 +75,8 @@ data Errors =
   | RestoreNameError RestoreNameError
   deriving (Eq)
 data NamingContextError a = 
-    MissingVariableInNamingContext (Named 'INDEX a) NamingContext 
-  | MissingTypeVariableInNamingContext (Named 'INDEX a) NamingContext
+    MissingVariableInNamingContext (Named a) NamingContext 
+  | MissingTypeVariableInNamingContext (Named a) NamingContext
 type UnNameError = NamingContextError 'True
 type RestoreNameError = NamingContextError 'False
 data TypingError = 
@@ -107,23 +86,20 @@ data TypingError =
   | RestoreNameErrorWhileTypingError RestoreNameError
   deriving (Eq)
 
-instance Exception Errors
-instance (Typeable a, Show (Named 'INDEX a)) => Exception (NamingContextError a)
-instance Exception TypingError
 
-deriving instance (Eq (Named 'TYPE a), Eq (Named 'INDEX a)) => Eq (Type a)
-deriving instance (Eq (Named 'TERM a), Eq (Named 'TYPE a), Eq (Named 'INDEX a)) => Eq (Term a)
-deriving instance Eq (Named 'INDEX a) => Eq (NamingContextError a)
-deriving instance (Ord (Named 'TYPE a), Ord (Named 'INDEX a)) => Ord (Type a)
-deriving instance (Ord (Named 'TERM a), Ord (Named 'TYPE a), Ord (Named 'INDEX a)) => Ord (Term a)
+deriving instance (Eq (Type a), Eq (Named a)) => Eq (Type a)
+deriving instance (Eq (Term a), Eq (Type a), Eq (Named a)) => Eq (Term a)
+deriving instance Eq (Named a) => Eq (NamingContextError a)
+deriving instance (Ord (Type a), Ord (Named a)) => Ord (Type a)
+deriving instance (Ord (Term a), Ord (Type a), Ord (Named a)) => Ord (Term a)
 
-instance (Show (Named 'INDEX a), Show (Named 'TYPE a)) => Show (Type a) where
+instance (Show (Named a), Show (Type a)) => Show (Type a) where
   show (PrimitiveType ty) = show ty
   show (VariableType ty)  = show (ty ^. #id)
   show (ArrowType ty)     = concat ["(", show (ty ^. #domain), " -> ", show (ty ^. #codomain), ")"]
   show (RecursionType ty) = concat ["(μ", show (ty ^. #name), ".", show (ty ^. #body), ")"]
 
-instance (Show (Named 'INDEX a), Show (Named 'TYPE a), Show (Named 'TERM a)) => Show (Term a) where
+instance (Show (Named a), Show (Type a), Show (Term a)) => Show (Term a) where
   show (ConstTerm s) = show s
   show (VariableTerm t) = show (t ^. #id)
   show (AbstractionTerm t) = concat ["(λ", show (t ^. #name), ":", show (t ^. #type), ".", show (t ^. #body), ")"]
@@ -133,7 +109,7 @@ instance Show Errors where
   show (UnNameError e) = "UnName Error: " ++ show e
   show (TypingError e) = "Typing Error: " ++ show e
   show (RestoreNameError e) = "RestoreName Error: " ++ show e
-instance Show (Named 'INDEX a) => Show (NamingContextError a) where
+instance Show (Named a) => Show (NamingContextError a) where
   show (MissingVariableInNamingContext name ctx) = concat ["missing variable in naming context: variable: ", show name, ", NamingContext: ", show ctx]
   show (MissingTypeVariableInNamingContext name ctx) = concat ["missing type variable in naming context: type variable: ", show name, ", NamingContext: ", show ctx]
 instance Show TypingError where
@@ -277,7 +253,7 @@ typeOf (VariableTerm t) = do
   ctx <- get
   case ctx V.!? (t ^. #id) of
     Just (_, VariableTermBind ty) -> return ty
-    _ -> get >>= throwError . MissingVariableTypeInNamingContext (t ^. #id)
+    _ -> throwError $ MissingVariableTypeInNamingContext (t ^. #id) ctx
 typeOf (AbstractionTerm t) = do
   newctx <- V.cons (t ^. #name, VariableTermBind $ t ^. #type) <$> get
   codomain <- castEff $ evalStateDef (typeOf $ t ^. #body) newctx
@@ -289,11 +265,10 @@ typeOf (ApplicationTerm t) = do
   case isArrowable ty1 of
     Just (ArrowType ty1') | leaveEvalStateDef Set.empty (isEquivalent ty2 (ty1' ^. #domain)) -> return $ ty1' ^. #codomain
     _ -> do
-      ctx' <- get
-      t1'  <- castEff . mapError RestoreNameErrorWhileTypingError $ evalStateDef (restoreName $ t ^. #function) ctx'  
-      ty1' <- castEff . mapError RestoreNameErrorWhileTypingError $ evalStateDef (restoreName ty1) ctx'
-      t2'  <- castEff . mapError RestoreNameErrorWhileTypingError $ evalStateDef (restoreName $ t ^. #argument) ctx'
-      ty2' <- castEff . mapError RestoreNameErrorWhileTypingError $ evalStateDef (restoreName ty2) ctx'
+      t1'  <- castEff . mapError RestoreNameErrorWhileTypingError $ evalStateDef (restoreName $ t ^. #function) ctx
+      ty1' <- castEff . mapError RestoreNameErrorWhileTypingError $ evalStateDef (restoreName ty1) ctx
+      t2'  <- castEff . mapError RestoreNameErrorWhileTypingError $ evalStateDef (restoreName $ t ^. #argument) ctx
+      ty2' <- castEff . mapError RestoreNameErrorWhileTypingError $ evalStateDef (restoreName ty2) ctx
       throwError $ NotMatchedTypeArrowType t1' ty1' t2' ty2'
 
 isArrowable :: UnNamedType -> Maybe UnNamedType
