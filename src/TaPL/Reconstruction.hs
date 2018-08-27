@@ -7,10 +7,13 @@
 {-# LANGUAGE TypeOperators      #-}
 {-# LANGUAGE UndecidableInstances #-}
 
+{-# LANGUAGE PolyKinds #-}
+
 module TaPL.Reconstruction where
 
 
 import RIO
+import qualified RIO.Map as Map
 import qualified RIO.Set as Set
 import qualified RIO.Vector as V
 
@@ -20,7 +23,7 @@ import Control.Monad.Error.Class
 import Data.Extensible
 import Data.Extensible.Effect.Default
 
-import qualified SString
+import SString
 
 
 type DeBrujinIndex = Int
@@ -29,7 +32,7 @@ type NamedTerm = Term 'True
 type UnNamedTerm = Term 'False
 
 type family Named (a :: Bool) where
-  Named 'True  = SString.SString
+  Named 'True  = SString
   Named 'False = DeBrujinIndex
 
 class UnName (f :: Bool -> *) where
@@ -43,14 +46,22 @@ betaReduction :: (IndexShift f, Substitution f) => f 'False -> f 'False -> f 'Fa
 betaReduction s t = indexShift (-1) $ subst 0 (indexShift 1 s) t
 
 
+mapEitherDef :: (e -> e') -> Eff '[EitherDef e] a -> Eff '[EitherDef e'] a 
+mapEitherDef f m = do
+  ret <- castEff $ runEitherDef m
+  case ret of
+    Right a -> return a
+    Left e -> throwError $ f e
+
 data Type = 
+    -- PrimitiveType SString
     NatType
   | BoolType
-  | VariableType (Record '["id" :> SString.SString])
+  | VariableType VariableType
   | ArrowType (Record '[ "domain" >: Type, "codomain" >: Type])
   deriving (Eq, Ord)
--- deriving instance (Eq (Named a)) => Eq (Type a)
--- deriving instance (Ord (Named a)) => Ord (Type a)
+-- type VariableType = Int
+type VariableType = SString
 data Term a = 
     Zero
   | Succ (Term a)
@@ -59,26 +70,56 @@ data Term a =
   | TRUE
   | FALSE
   | If (Record '["cond" :> Term a, "then" :> Term a, "else" :> Term a])
-  | VariableTerm (Record '["id" :> Named a])
-  | AbstractionTerm (Record '["name" :> SString.SString, "type" :> Type, "body" :> Term a])
+  | VariableTerm (Named a)
+  | AbstractionTerm (Record '["name" :> SString, "type" :> Type, "body" :> Term a])
   | ApplicationTerm (Record '["function" :> Term a, "argument" :> Term a])
+  | FixTerm (Term a)
 data Binding = 
     ConstTermBind Type
   | VariableTermBind Type
   | ConstTypeBind 
   | VariableTypeBind 
-  -- deriving (Show, Eq)
-type NamingContext = Vector (SString.SString, Binding)
+  deriving (Show, Eq)
+type NamingContext = Vector (SString, Binding)
 type Constraints = Set.Set (Type, Type)
+type Unifier = Map.Map VariableType Type
 
+data Errors = 
+    UnNameError UnNameError
+  | TypingError TypingError
+  | RestoreNameError RestoreNameError
+  deriving (Eq)
 data NamingContextError a = 
     MissingVariableInNamingContext (Named a) NamingContext 
   | MissingTypeVariableInNamingContext (Named a) NamingContext
 type UnNameError = NamingContextError 'True
 type RestoreNameError = NamingContextError 'False
-data ReconstructionError = MissingVariableTypeInNamingContext  DeBrujinIndex NamingContext
+data TypingError = ReconstructionError ReconstructionError | UnifyError UnifyError deriving (Eq)
+data ReconstructionError = MissingVariableTypeInNamingContext  DeBrujinIndex NamingContext deriving (Eq)
+data UnifyError = UnifyFailed | InstantiateFalied deriving (Show, Eq)
 
 
+deriving instance Eq (Named a) => Eq (NamingContextError a)
+instance Show Type where
+  -- show (PrimitiveType ty) = show ty
+  show NatType = "Nat"
+  show BoolType = "Bool"
+  -- show (VariableType n)  = "?X_" ++ show n
+  show (VariableType name) = show name
+  show (ArrowType ty)     = concat ["(", show (ty ^. #domain), " -> ", show (ty ^. #codomain), ")"]
+
+instance Show Errors where
+  show (UnNameError e) = "UnName Error: " ++ show e
+  show (TypingError e) = "Typing Error: " ++ show e
+  show (RestoreNameError e) = "RestoreName Error: " ++ show e
+instance Show (Named a) => Show (NamingContextError a) where
+  show (MissingVariableInNamingContext name ctx) = concat ["missing variable in naming context: variable: ", show name, ", NamingContext: ", show ctx]
+  show (MissingTypeVariableInNamingContext name ctx) = concat ["missing type variable in naming context: type variable: ", show name, ", NamingContext: ", show ctx]
+instance Show TypingError where
+  show (ReconstructionError e) = "Reconstruction Error: " ++ show e
+  show (UnifyError e) = "Unify Error: " ++ show e
+instance Show ReconstructionError where
+  show (MissingVariableTypeInNamingContext name ctx) = concat ["missing variable in naming context: variable: ", show name, ", NamingContext: ", show ctx]
 -- instance UnName Type where
 --   unName NatType = return NatType
 --   unName BoolType = return BoolType
@@ -125,24 +166,25 @@ instance UnName Term where
   unName (VariableTerm t) = do
     maybei <- V.findIndex isBound <$> getEff #context
     case maybei of
-      Just i  -> return . VariableTerm $ #id @= i <: nil
+      Just i  -> return $ VariableTerm i
       Nothing -> do
         ctx <- getEff #context
-        throwError $ MissingVariableInNamingContext (t ^. #id) ctx
+        throwError $ MissingVariableInNamingContext t ctx
     where
-      isBound (x, VariableTermBind _) | x == t ^. #id = True
+      isBound (x, VariableTermBind _) | x == t = True
       isBound _ = False
   unName (AbstractionTerm t) = do
     let x  = t ^. #name
         ty = t ^. #type
-    newctx <- modifyEff #context (V.cons (x, VariableTermBind ty)) >> getEff #context
-    t' <- castEff $ evalStateEff @"context" (unName $ t ^. #body) newctx
+    modifyEff #context (V.cons (x, VariableTermBind ty))
+    t' <- unName $ t ^. #body
     return . AbstractionTerm $ #name @= x <: #type @= ty <: #body @= t' <: nil
   unName (ApplicationTerm t) = do
     ctx <- getEff #context
     t1 <- castEff $ evalStateEff @"context" (unName $ t ^. #function) ctx
     t2 <- castEff $ evalStateEff @"context" (unName $ t ^. #argument) ctx
     return . ApplicationTerm $ #function @= t1 <: #argument @= t2 <: nil
+  unName (FixTerm t) = FixTerm <$> unName t
 
 
   restoreName Zero = return Zero
@@ -159,29 +201,30 @@ instance UnName Term where
     return . If $ #cond @= t1 <: #then @= t2 <: #else @= t3 <: nil
   restoreName (VariableTerm t) = do
     ctx <- getEff #context
-    case ctx V.!? (t ^. #id) of
-      Just (name, _) -> return $ VariableTerm $ #id @= name <: nil
-      Nothing -> getEff #context >>= throwError . MissingVariableInNamingContext (t ^. #id)
+    case ctx V.!? t of
+      Just (name, _) -> return $ VariableTerm name
+      Nothing -> getEff #context >>= throwError . MissingVariableInNamingContext t
   restoreName (AbstractionTerm t) = do
     let x  = t ^. #name
         ty = t ^. #type
-    newctx <- modifyEff #context (V.cons (x, VariableTermBind ty)) >> getEff #context
-    t'  <- castEff $ evalStateEff @"context" (restoreName $ t ^. #body) newctx
+    modifyEff #context (V.cons (x, VariableTermBind ty))
+    t'  <- restoreName $ t ^. #body
     return . AbstractionTerm $ #name @= x <: #type @= ty <: #body @= t' <: nil
   restoreName (ApplicationTerm t) = do
     ctx <- getEff #context
     t1 <- castEff $ evalStateEff @"context" (restoreName $ t ^. #function) ctx
     t2 <- castEff $ evalStateEff @"context" (restoreName $ t ^. #argument) ctx
     return . ApplicationTerm $ #function @= t1 <: #argument @= t2 <: nil
+  restoreName (FixTerm t) = FixTerm <$> restoreName t
 
+leaveUnName :: NamingContext -> NamedTerm -> Either UnNameError UnNamedTerm
+leaveUnName ctx t = leaveEff . runEitherDef $ evalStateEff @"context" (unName t) ctx
 
-
-
-freshTypeVariable :: Associate "fresh" (State Int) xs => Eff xs SString.SString
+freshTypeVariable :: Associate "fresh" (State Int) xs => Eff xs VariableType
 freshTypeVariable = do
   n <- getEff #fresh
-  modifyEff #fresh (+ 1)
-  return $ "?X_" <> SString.pack (show n)
+  putEff #fresh (n+1)
+  return . pack $ "?X_" ++ show n
 
 reconstruction :: UnNamedTerm -> Eff '["context" >: State NamingContext,  "fresh" >: State Int, EitherDef ReconstructionError] (Type, Constraints)
 reconstruction Zero = return (NatType, Set.empty)
@@ -204,9 +247,9 @@ reconstruction (If t) = do
   return (ty2, (ty1, BoolType) `Set.insert` ((ty2, ty3) `Set.insert` (c1 `Set.union` c2 `Set.union` c3)))
 reconstruction (VariableTerm t) = do
   ctx <- getEff #context
-  case ctx V.!? (t ^. #id) of
+  case ctx V.!? t of
     Just (_, VariableTermBind ty) -> return (ty, Set.empty)
-    _ -> throwError $ MissingVariableTypeInNamingContext (t ^. #id) ctx
+    _ -> throwError $ MissingVariableTypeInNamingContext t ctx
 reconstruction (AbstractionTerm t) = do
   modifyEff #context $ V.cons (t ^. #name, VariableTermBind $ t ^. #type)
   (bodyty, c) <- reconstruction $ t ^. #body
@@ -215,5 +258,53 @@ reconstruction (ApplicationTerm t)  = do
   ctx <- getEff #context
   (ty1, c1) <- castEff $ evalStateEff @"context" (reconstruction $ t ^. #function) ctx
   (ty2, c2)<- castEff $ evalStateEff @"context" (reconstruction $ t ^. #argument) ctx
-  typevar <- VariableType . (\id -> #id @= id <: nil) <$> freshTypeVariable
+  typevar <- VariableType <$> freshTypeVariable
   return (typevar, c1 `Set.union` c2 `Set.union` Set.singleton (ty1, ArrowType $ #domain @= ty2 <: #codomain @= typevar <: nil))
+reconstruction (FixTerm f) = do
+  (ty, c) <- reconstruction f
+  typevar <- VariableType <$> freshTypeVariable
+  return (typevar, c `Set.union` Set.singleton (ty, ArrowType (#domain @= typevar <: #codomain @= typevar <: nil)))
+
+leaveReconstruction :: NamingContext -> UnNamedTerm -> Either ReconstructionError (Type, Constraints)
+leaveReconstruction ctx t = leaveEff . runEitherDef $ evalStateEff @"fresh" (evalStateEff @"context" (reconstruction t) ctx) 0
+
+
+unify :: Constraints -> Eff '[EitherDef UnifyError] Unifier
+unify c = case Set.lookupMin c of
+  Nothing -> return Map.empty
+  Just (s, t) | s == t  -> unify $ Set.deleteMin c
+  Just (v@(VariableType n), t) | not (occurCheck v t) -> Map.insert n t <$> unify (Set.deleteMin c)
+  Just (s, v@(VariableType n)) | not (occurCheck v s) -> Map.insert n s <$> unify (Set.deleteMin c)
+  Just (ArrowType ty1, ArrowType ty2) -> unify . Set.insert (ty1 ^. #domain, ty2 ^. #domain) . Set.insert (ty1 ^. #codomain, ty2 ^. #codomain) $ Set.deleteMin c
+  _ -> throwError UnifyFailed
+  where
+    occurCheck v t@(VariableType _) = v == t
+    occurCheck v (ArrowType ty) = occurCheck v (ty ^. #domain) || occurCheck v (ty ^. #codomain)
+    occurCheck _ _ = False
+
+-- TODO: infinite loop risk, x = y = z
+refineUnifer :: Unifier -> Eff '[EitherDef UnifyError] Unifier
+refineUnifer sigma = traverse (castEff . flip runReaderDef sigma . instantiate) sigma
+
+instantiate :: Type -> Eff '[ReaderDef Unifier] Type
+instantiate (VariableType name) = do
+  sigma <- ask
+  case sigma Map.!? name of
+    Just ty -> instantiate ty
+    Nothing -> return $ VariableType name
+    -- Nothing -> throwError InstantiateFalied
+instantiate (ArrowType ty') = do
+  domain <- instantiate $ ty' ^. #domain
+  codomain <- instantiate $ ty' ^. #codomain
+  return . ArrowType $ #domain @= domain <: #codomain @= codomain <: nil
+instantiate t = return t
+
+unify' :: Constraints -> Eff '[EitherDef UnifyError] Unifier
+unify' = unify >=> refineUnifer
+
+typeOf :: NamingContext -> UnNamedTerm -> Eff '[EitherDef TypingError] Type
+typeOf ctx t = do
+  (ty, c) <- mapEitherDef  ReconstructionError $ evalStateEff @"fresh"   (evalStateEff @"context" (reconstruction t) ctx) 0
+  sigma <- mapEitherDef UnifyError $ unify' c
+  castEff $ runReaderDef (instantiate ty) sigma
+
