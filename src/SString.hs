@@ -10,5 +10,7 @@ instance Show SString where
   show (SString s) = Text.unpack s
 instance Semigroup SString where
   SString s1 <> SString s2 = SString (s1 <> s2)
+instance Monoid SString where
+  mempty = SString ""
 pack :: String -> SString
 pack = SString . Text.pack

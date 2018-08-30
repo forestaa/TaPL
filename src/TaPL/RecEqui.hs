@@ -66,7 +66,7 @@ type NamedTerm = Term 'True
 type UnNamedTerm = Term 'False
 
 type Declarations = [(SString, Declaration)]
-data Declaration = ConstTermDec NamedType | ConstTypeDec
+data Declaration = ConstTermDec NamedType | ConstTypeDec deriving (Show)
 type NamingContext = Vector (SString, Binding)
 data Binding = ConstTermBind UnNamedType | VariableTermBind UnNamedType | ConstTypeBind | VariableTypeBind deriving (Show, Eq)
 data Errors = 
@@ -124,6 +124,7 @@ declarationsToContext ds = (V.++) ctx <$> traverse ((\(a, b) -> (,) a <$> b) . (
     isTypeDec (_, ConstTypeDec) = True
     isTypeDec _ = False
     extractType (ConstTermDec ty) = ty
+    extractType b = error $ "declarationsToContext: extractType: unexpected pattern: " ++ show b
     (typedec, termdec) = (& _2 %~ fmap (& _2 %~ extractType)) $ V.partition isTypeDec $ V.fromList ds
     ctx = (& _2 .~ ConstTypeBind) <$> typedec
 

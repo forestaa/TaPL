@@ -15,6 +15,17 @@ import Data.Extensible.Effect.Default
 
 spec :: Spec
 spec = do
+  describe "unName/restoreName" $ do
+    it "(λx:Nat. x, λx. x)" $ do
+      let t = PairTerm (AbstractionTerm (#name @= "x" <: #type @= NatType <: #body @= VariableTerm "x" <: nil)) (ImplicitAbstractionTerm (#name @= "x" <: #body @= VariableTerm "x" <: nil))
+      case leaveUnName [] t of
+        Left e -> expectationFailure $ show e
+        Right t' -> leaveRestoreName [] t' `shouldBe` Right t
+    it "let ..." $ do
+      let t = LetTerm (#name @= "x" <: #body @= ImplicitAbstractionTerm (#name @= "x" <: #body @= PairTerm (VariableTerm "x") (VariableTerm "x") <: nil) <: #in @= LetTerm (#name @= "x" <: #body @= ImplicitAbstractionTerm (#name @= "y" <: #body @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= VariableTerm "y" <: nil) <: nil) <: nil) <: #in @= LetTerm (#name @= "x" <: #body @= ImplicitAbstractionTerm (#name @= "y" <: #body @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= VariableTerm "y" <: nil) <: nil) <: nil) <: #in @= LetTerm (#name @= "x" <: #body @= ImplicitAbstractionTerm (#name @= "y" <: #body @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= VariableTerm "y" <: nil) <: nil) <: nil) <: #in @= LetTerm (#name @= "x" <: #body @= ImplicitAbstractionTerm (#name @= "y" <: #body @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= VariableTerm "y" <: nil) <: nil) <: nil) <: #in @= LetTerm (#name @= "x" <: #body @= ImplicitAbstractionTerm (#name @= "y" <: #body @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= VariableTerm "y" <: nil) <: nil) <: nil) <: #in @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= ImplicitAbstractionTerm (#name @= "x" <: #body @= VariableTerm "x" <: nil) <: nil) <: nil) <: nil) <: nil) <: nil) <: nil) <: nil)
+      case leaveUnName [] t of
+        Left e -> expectationFailure $ show e
+        Right t' -> leaveRestoreName [] t' `shouldBe` Right t
   describe "reconstruction" $
     it "exercise 22.3.3" $ do
       let ctx = [("X", ConstTypeBind), ("Y", ConstTypeBind), ("Z", ConstTypeBind)]
@@ -62,6 +73,12 @@ spec = do
     it "λw:W. if true then false else w false" $ do
       let t = AbstractionTerm (#name @= "w" <: #type @= VariableType "W" <: #body @= If (#cond @= TRUE <: #then @= FALSE <: #else @= ApplicationTerm (#function @= VariableTerm "w" <: #argument @= FALSE <: nil) <: nil) <: nil)
           expected = ArrowType (#domain @= ArrowType (#domain @= BoolType <: #codomain @= BoolType <: nil) <: #codomain @= BoolType <: nil)
+      case leaveUnName [] t of
+        Left e -> expectationFailure $ show e
+        Right t' -> leaveEff (runEitherDef (typeOf [] t')) `shouldBe` Right expected
+    it "let polymorphism" $ do
+      let t = LetTerm (#name @= "x" <: #body @= ImplicitAbstractionTerm (#name @= "x" <: #body @= PairTerm (VariableTerm "x") (VariableTerm "x") <: nil) <: #in @= LetTerm (#name @= "x" <: #body @= ImplicitAbstractionTerm (#name @= "y" <: #body @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= VariableTerm "y" <: nil) <: nil) <: nil) <: #in @= LetTerm (#name @= "x" <: #body @= ImplicitAbstractionTerm (#name @= "y" <: #body @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= VariableTerm "y" <: nil) <: nil) <: nil) <: #in @= LetTerm (#name @= "x" <: #body @= ImplicitAbstractionTerm (#name @= "y" <: #body @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= VariableTerm "y" <: nil) <: nil) <: nil) <: #in @= LetTerm (#name @= "x" <: #body @= ImplicitAbstractionTerm (#name @= "y" <: #body @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= VariableTerm "y" <: nil) <: nil) <: nil) <: #in @= LetTerm (#name @= "x" <: #body @= ImplicitAbstractionTerm (#name @= "y" <: #body @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= VariableTerm "y" <: nil) <: nil) <: nil) <: #in @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= ImplicitAbstractionTerm (#name @= "x" <: #body @= VariableTerm "x" <: nil) <: nil) <: nil) <: nil) <: nil) <: nil) <: nil) <: nil)
+          expected = NatType
       case leaveUnName [] t of
         Left e -> expectationFailure $ show e
         Right t' -> leaveEff (runEitherDef (typeOf [] t')) `shouldBe` Right expected

@@ -58,7 +58,9 @@ data Type =
     NatType
   | BoolType
   | VariableType VariableType
-  | ArrowType (Record '[ "domain" >: Type, "codomain" >: Type])
+  | ArrowType (Record '["domain" >: Type, "codomain" >: Type])
+  | PairType Type Type
+  | TypeScheme (Record '["schemes" >: Set.Set VariableType, "type" >: Type])
   deriving (Eq, Ord)
 -- type VariableType = Int
 type VariableType = SString
@@ -74,9 +76,13 @@ data Term a =
   | AbstractionTerm (Record '["name" :> SString, "type" :> Type, "body" :> Term a])
   | ApplicationTerm (Record '["function" :> Term a, "argument" :> Term a])
   | FixTerm (Term a)
+  | PairTerm (Term a) (Term a)
+  | ImplicitAbstractionTerm (Record '["name" :> SString, "body" :> Term a])
+  | LetTerm (Record '["name" >: SString, "body" :> Term a, "in" :> Term a])
 data Binding = 
     ConstTermBind Type
   | VariableTermBind Type
+  | ImplicitVariableTermBind
   | ConstTypeBind 
   | VariableTypeBind 
   deriving (Show, Eq)
@@ -99,6 +105,7 @@ data ReconstructionError = MissingVariableTypeInNamingContext  DeBrujinIndex Nam
 data UnifyError = UnifyFailed | InstantiateFalied deriving (Show, Eq)
 
 
+deriving instance Eq (Named a) => Eq (Term a)
 deriving instance Eq (Named a) => Eq (NamingContextError a)
 instance Show Type where
   -- show (PrimitiveType ty) = show ty
@@ -107,6 +114,25 @@ instance Show Type where
   -- show (VariableType n)  = "?X_" ++ show n
   show (VariableType name) = show name
   show (ArrowType ty)     = concat ["(", show (ty ^. #domain), " -> ", show (ty ^. #codomain), ")"]
+  show (PairType ty1 ty2) = concat ["(", show ty1, ", ", show ty2, ")"]
+  show (TypeScheme ty) = concat ["∀", foldMap show (ty ^. #schemes), ".", show (ty ^. #type)]
+
+instance (Show (Named a)) => Show (Term a) where
+  show Zero = "z"
+  show (Succ t) = concat ["s(", show t, ")"]
+  show (Pred t) = concat ["pred(", show t, ")"]
+  show (IsZero t) = concat ["iszero ", show t]
+  show TRUE = "True"
+  show FALSE = "False"
+  show (If t) = concat ["if ", show (t ^. #cond), " then ", show (t ^. #then), " else ", show (t ^. #else)]
+  show (VariableTerm name) = show name
+  show (AbstractionTerm t) = concat ["λ", show (t ^. #name), ":", show (t ^. #type), ".", show (t ^. #body)]
+  show (ApplicationTerm t) = concat ["(", show (t ^. #function), " ", show (t ^. #argument), ")"]
+  show (FixTerm t) = concat ["fix ", show t]
+  show (PairTerm t1 t2) = concat ["(", show t1, ", ", show t2, ")"]
+  show (ImplicitAbstractionTerm t) = concat ["λ", show (t ^. #name), ".", show (t ^. #body)]
+  show (LetTerm t) = concat ["let ", show (t ^. #name), " = ", show (t ^. #body), " in ", show (t ^. #in)]
+
 
 instance Show Errors where
   show (UnNameError e) = "UnName Error: " ++ show e
@@ -172,19 +198,36 @@ instance UnName Term where
         throwError $ MissingVariableInNamingContext t ctx
     where
       isBound (x, VariableTermBind _) | x == t = True
+      isBound (x, ImplicitVariableTermBind) | x == t = True
       isBound _ = False
   unName (AbstractionTerm t) = do
     let x  = t ^. #name
         ty = t ^. #type
     modifyEff #context (V.cons (x, VariableTermBind ty))
-    t' <- unName $ t ^. #body
-    return . AbstractionTerm $ #name @= x <: #type @= ty <: #body @= t' <: nil
+    body <- unName $ t ^. #body
+    return . AbstractionTerm $ #name @= x <: #type @= ty <: #body @= body <: nil
   unName (ApplicationTerm t) = do
     ctx <- getEff #context
     t1 <- castEff $ evalStateEff @"context" (unName $ t ^. #function) ctx
     t2 <- castEff $ evalStateEff @"context" (unName $ t ^. #argument) ctx
     return . ApplicationTerm $ #function @= t1 <: #argument @= t2 <: nil
   unName (FixTerm t) = FixTerm <$> unName t
+  unName (PairTerm t1 t2) = do
+    ctx <- getEff #context
+    t1' <- castEff $ evalStateEff @"context" (unName t1) ctx
+    t2' <- castEff $ evalStateEff @"context" (unName t2) ctx
+    return $ PairTerm t1' t2'
+  unName (ImplicitAbstractionTerm t) = do
+    let x = t ^. #name
+    modifyEff #context (V.cons (x, ImplicitVariableTermBind))
+    body <- unName $ t ^. #body
+    return . ImplicitAbstractionTerm $ #name @= x <: #body @= body <: nil
+  unName (LetTerm t) = do
+    let x = t ^. #name
+    ctx <- modifyEff #context (V.cons (x, ImplicitVariableTermBind)) >> getEff #context
+    body <- castEff $ evalStateEff @"context" (unName $ t ^. #body) ctx
+    t' <- unName $ t ^. #in
+    return . LetTerm $ #name @= x <: #body @= body <: #in @= t' <: nil
 
 
   restoreName Zero = return Zero
@@ -216,9 +259,27 @@ instance UnName Term where
     t2 <- castEff $ evalStateEff @"context" (restoreName $ t ^. #argument) ctx
     return . ApplicationTerm $ #function @= t1 <: #argument @= t2 <: nil
   restoreName (FixTerm t) = FixTerm <$> restoreName t
+  restoreName (PairTerm t1 t2) = do
+    ctx <- getEff #context
+    t1' <- castEff $ evalStateEff @"context" (restoreName t1) ctx
+    t2' <- castEff $ evalStateEff @"context" (restoreName t2) ctx
+    return $ PairTerm t1' t2'
+  restoreName (ImplicitAbstractionTerm t) = do
+    let x = t ^. #name
+    modifyEff #context (V.cons (x, ImplicitVariableTermBind))
+    body <- restoreName $ t ^. #body
+    return . ImplicitAbstractionTerm $ #name @= x <: #body @= body <: nil
+  restoreName (LetTerm t) = do
+    let x = t ^. #name
+    ctx <- modifyEff #context (V.cons (x, ImplicitVariableTermBind)) >> getEff #context
+    body <- castEff $ evalStateEff @"context" (restoreName $ t ^. #body) ctx
+    t' <- restoreName $ t ^. #in
+    return . LetTerm $ #name @= x <: #body @= body <: #in @= t' <: nil
 
 leaveUnName :: NamingContext -> NamedTerm -> Either UnNameError UnNamedTerm
 leaveUnName ctx t = leaveEff . runEitherDef $ evalStateEff @"context" (unName t) ctx
+leaveRestoreName :: NamingContext -> UnNamedTerm -> Either RestoreNameError NamedTerm
+leaveRestoreName ctx t = leaveEff . runEitherDef $ evalStateEff @"context" (restoreName t) ctx
 
 freshTypeVariable :: Associate "fresh" (State Int) xs => Eff xs VariableType
 freshTypeVariable = do
@@ -257,7 +318,7 @@ reconstruction (AbstractionTerm t) = do
 reconstruction (ApplicationTerm t)  = do
   ctx <- getEff #context
   (ty1, c1) <- castEff $ evalStateEff @"context" (reconstruction $ t ^. #function) ctx
-  (ty2, c2)<- castEff $ evalStateEff @"context" (reconstruction $ t ^. #argument) ctx
+  (ty2, c2) <- castEff $ evalStateEff @"context" (reconstruction $ t ^. #argument) ctx
   typevar <- VariableType <$> freshTypeVariable
   return (typevar, c1 `Set.union` c2 `Set.union` Set.singleton (ty1, ArrowType $ #domain @= ty2 <: #codomain @= typevar <: nil))
 reconstruction (FixTerm f) = do
@@ -292,7 +353,6 @@ instantiate (VariableType name) = do
   case sigma Map.!? name of
     Just ty -> instantiate ty
     Nothing -> return $ VariableType name
-    -- Nothing -> throwError InstantiateFalied
 instantiate (ArrowType ty') = do
   domain <- instantiate $ ty' ^. #domain
   codomain <- instantiate $ ty' ^. #codomain
