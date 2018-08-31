@@ -8,10 +8,13 @@ import TaPL.Reconstruction
 import RIO
 import qualified RIO.Map as Map
 import qualified RIO.Set as Set
-
+import qualified RIO.Text as Text
 
 import Data.Extensible
 import Data.Extensible.Effect.Default
+
+import System.IO
+
 
 spec :: Spec
 spec = do
@@ -32,9 +35,11 @@ spec = do
           t = AbstractionTerm $ #name @= "x" <: #type @= VariableType "X" <: #body @= AbstractionTerm (#name @= "y" <: #type @= VariableType "Y" <: #body @= AbstractionTerm (#name @= "z" <: #type @= VariableType "Z" <: #body @= ApplicationTerm (#function @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= VariableTerm "z" <: nil) <: #argument @= ApplicationTerm (#function @= VariableTerm "y" <: #argument @= VariableTerm "z" <: nil) <: nil) <: nil) <: nil) <: nil
           expectedty = ArrowType $ #domain @= VariableType "X" <: #codomain @= ArrowType (#domain @= VariableType "Y" <: #codomain @= ArrowType (#domain @= VariableType "Z" <: #codomain @= VariableType "?X_2" <: nil) <: nil) <: nil
           expectedconstraints = [(VariableType "?X_0", ArrowType (#domain @= VariableType "?X_1" <: #codomain @= VariableType "?X_2" <: nil)), (VariableType "X", ArrowType (#domain @= VariableType "Z" <: #codomain @= VariableType "?X_0" <: nil)), (VariableType "Y", ArrowType (#domain @= VariableType "Z" <: #codomain @= VariableType "?X_1" <: nil))]
-      case leaveUnName ctx t of
-        Right t' -> leaveReconstruction ctx t' `shouldBe` Right (expectedty, expectedconstraints)
-        Left _ -> expectationFailure "panic"
+      case leaveEff . runEitherDef $ unify' expectedconstraints of
+        Left e -> expectationFailure $ show e
+        Right unifier -> case leaveUnName ctx t of
+          Left _ -> expectationFailure "panic"
+          Right t' -> leaveReconstruction ctx t' `shouldBe` Right (instantiate unifier expectedty)
   describe "unify" $ do
     it "exercise 22.4.3 1" $ do
       let c = [(VariableType "X", NatType), (VariableType "Y", ArrowType (#domain @= VariableType "X" <: #codomain @= VariableType "X" <: nil))]
@@ -50,13 +55,18 @@ spec = do
       leaveEff (runEitherDef $ unify' c) `shouldBe` Right expected
     it "exercise 22.4.3 4" $ do
       let c = [(NatType, ArrowType (#domain @= NatType <: #codomain @= VariableType "X" <: nil))]
-      leaveEff (runEitherDef $ unify' c) `shouldBe` Left UnifyFailed
+      leaveEff (runEitherDef $ unify' c) `shouldBe` Left (ConstraintsConflict [(NatType, ArrowType (#domain @= NatType <: #codomain @= VariableType "X" <: nil))])
     it "exercise 22.4.3 5" $ do
       let c = [(VariableType "X", ArrowType (#domain @= NatType <: #codomain @= VariableType "X" <: nil))]
-      leaveEff (runEitherDef $ unify'  c) `shouldBe` Left UnifyFailed
+      leaveEff (runEitherDef $ unify'  c) `shouldBe` Left (ConstraintsConflict [(VariableType "X", ArrowType (#domain @= NatType <: #codomain @= VariableType "X" <: nil))])
     it "exercise 22.4.3 6" $ do
       let c = []
       leaveEff (runEitherDef $ unify' c) `shouldBe` Right Map.empty
+  describe "freeVariable" $
+    it "λx. x" $ do
+      let t = ImplicitAbstractionTerm (#name @= "x" <: #body @= VariableTerm "x" <: nil)
+          Right ty = typeOf' [] t
+      leaveEff (runReaderDef (freeVariable ty) []) `shouldBe` ["?X_0"]
   describe "typeOf" $ do
     it "λx:X. x" $ do
       let t = AbstractionTerm (#name @= "x" <: #type @= VariableType "X" <: #body @= VariableTerm "x"<: nil)
@@ -76,9 +86,15 @@ spec = do
       case leaveUnName [] t of
         Left e -> expectationFailure $ show e
         Right t' -> leaveEff (runEitherDef (typeOf [] t')) `shouldBe` Right expected
-    it "let polymorphism" $ do
-      let t = LetTerm (#name @= "x" <: #body @= ImplicitAbstractionTerm (#name @= "x" <: #body @= PairTerm (VariableTerm "x") (VariableTerm "x") <: nil) <: #in @= LetTerm (#name @= "x" <: #body @= ImplicitAbstractionTerm (#name @= "y" <: #body @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= VariableTerm "y" <: nil) <: nil) <: nil) <: #in @= LetTerm (#name @= "x" <: #body @= ImplicitAbstractionTerm (#name @= "y" <: #body @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= VariableTerm "y" <: nil) <: nil) <: nil) <: #in @= LetTerm (#name @= "x" <: #body @= ImplicitAbstractionTerm (#name @= "y" <: #body @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= VariableTerm "y" <: nil) <: nil) <: nil) <: #in @= LetTerm (#name @= "x" <: #body @= ImplicitAbstractionTerm (#name @= "y" <: #body @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= VariableTerm "y" <: nil) <: nil) <: nil) <: #in @= LetTerm (#name @= "x" <: #body @= ImplicitAbstractionTerm (#name @= "y" <: #body @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= VariableTerm "y" <: nil) <: nil) <: nil) <: #in @= ApplicationTerm (#function @= VariableTerm "x" <: #argument @= ImplicitAbstractionTerm (#name @= "x" <: #body @= VariableTerm "x" <: nil) <: nil) <: nil) <: nil) <: nil) <: nil) <: nil) <: nil)
-          expected = NatType
+    it "let f0 = λx.(x,x) in let f1 = λy.f0 (f0 y) in f1 (λz.z)" $ do
+      let t = LetTerm (#name @= "f0" <: #body @= ImplicitAbstractionTerm (#name @= "x" <: #body @= PairTerm (VariableTerm "x") (VariableTerm "x") <: nil) <: #in @= LetTerm (#name @= "f1" <: #body @= ImplicitAbstractionTerm (#name @= "y" <: #body @= ApplicationTerm (#function @= VariableTerm "f0" <: #argument @= ApplicationTerm (#function @= VariableTerm "f0" <: #argument @= VariableTerm "y" <: nil) <: nil) <: nil) <: #in @= ApplicationTerm (#function @= VariableTerm "f1" <: #argument @= ImplicitAbstractionTerm (#name @= "z" <: #body @= VariableTerm "z" <: nil) <: nil) <: nil) <: nil)
+          expected = PairType (PairType (ArrowType (#domain @= VariableType "?X_7" <: #codomain @= VariableType "?X_7" <: nil)) (ArrowType (#domain @= VariableType "?X_7" <: #codomain @= VariableType "?X_7" <: nil))) (PairType (ArrowType (#domain @= VariableType "?X_7" <: #codomain @= VariableType "?X_7" <: nil)) (ArrowType (#domain @= VariableType "?X_7" <: #codomain @= VariableType "?X_7" <: nil)))
+      case leaveUnName [] t of
+        Left e -> expectationFailure $ show e
+        Right t' -> leaveEff (runEitherDef (typeOf [] t')) `shouldBe` Right expected
+    it "let f0 = λx.(x,x) in let f1 = λy.f0 (f0 y) in let f2 = λy.f1 (f1 y) in f2 (λz.z)" $ do
+      let t = LetTerm (#name @= "f0" <: #body @= ImplicitAbstractionTerm (#name @= "x" <: #body @= PairTerm (VariableTerm "x") (VariableTerm "x") <: nil) <: #in @= LetTerm (#name @= "f1" <: #body @= ImplicitAbstractionTerm (#name @= "y" <: #body @= ApplicationTerm (#function @= VariableTerm "f0" <: #argument @= ApplicationTerm (#function @= VariableTerm "f0" <: #argument @= VariableTerm "y" <: nil) <: nil) <: nil) <: #in @= LetTerm (#name @= "f2" <: #body @= ImplicitAbstractionTerm (#name @= "y" <: #body @= ApplicationTerm (#function @= VariableTerm "f1" <: #argument @= ApplicationTerm (#function @= VariableTerm "f1" <: #argument @= VariableTerm "y" <: nil) <: nil) <: nil) <: #in @= ApplicationTerm (#function @= VariableTerm "f2" <: #argument @= ImplicitAbstractionTerm (#name @= "z" <: #body @= VariableTerm "z" <: nil) <: nil) <: nil) <: nil) <: nil)
+          expected = PairType (PairType (PairType (PairType (ArrowType (#domain @= VariableType "?X_12" <: #codomain @= VariableType "?X_12" <: nil)) (ArrowType (#domain @= VariableType "?X_12" <: #codomain @= VariableType "?X_12" <: nil))) (PairType (ArrowType (#domain @= VariableType "?X_12" <: #codomain @= VariableType "?X_12" <: nil)) (ArrowType (#domain @= VariableType "?X_12" <: #codomain @= VariableType "?X_12" <: nil)))) (PairType (PairType (ArrowType (#domain @= VariableType "?X_12" <: #codomain @= VariableType "?X_12" <: nil)) (ArrowType (#domain @= VariableType "?X_12" <: #codomain @= VariableType "?X_12" <: nil))) (PairType (ArrowType (#domain @= VariableType "?X_12" <: #codomain @= VariableType "?X_12" <: nil)) (ArrowType (#domain @= VariableType "?X_12" <: #codomain @= VariableType "?X_12" <: nil))))) (PairType (PairType (PairType (ArrowType (#domain @= VariableType "?X_12" <: #codomain @= VariableType "?X_12" <: nil)) (ArrowType (#domain @= VariableType "?X_12" <: #codomain @= VariableType "?X_12" <: nil))) (PairType (ArrowType (#domain @= VariableType "?X_12" <: #codomain @= VariableType "?X_12" <: nil)) (ArrowType (#domain @= VariableType "?X_12" <: #codomain @= VariableType "?X_12" <: nil)))) (PairType (PairType (ArrowType (#domain @= VariableType "?X_12" <: #codomain @= VariableType "?X_12" <: nil)) (ArrowType (#domain @= VariableType "?X_12" <: #codomain @= VariableType "?X_12" <: nil))) (PairType (ArrowType (#domain @= VariableType "?X_12" <: #codomain @= VariableType "?X_12" <: nil)) (ArrowType (#domain @= VariableType "?X_12" <: #codomain @= VariableType "?X_12" <: nil)))))
       case leaveUnName [] t of
         Left e -> expectationFailure $ show e
         Right t' -> leaveEff (runEitherDef (typeOf [] t')) `shouldBe` Right expected

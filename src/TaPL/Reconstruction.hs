@@ -25,6 +25,8 @@ import Data.Extensible.Effect.Default
 
 import SString
 
+import qualified Debug.Trace as D
+
 
 type DeBrujinIndex = Int
 
@@ -103,12 +105,12 @@ type RestoreNameError = NamingContextError 'False
 data TypingError = ReconstructionError ReconstructionError deriving (Eq)
 data ReconstructionError = 
     MissingVariableTypeInNamingContext  DeBrujinIndex NamingContext 
-  | UnifyError UnifyError
+  | UnifyError NamingContext UnNamedTerm UnifyError
   deriving (Eq)
 data UnifyError = 
-    Conflict
-  | InstantiateFalied 
-  deriving (Show, Eq)
+    ConstraintsConflict Constraints
+  | UnifierInsertConflict VariableType Type Unifier
+  deriving (Eq)
 
 
 deriving instance Eq (Named a) => Eq (Term a)
@@ -151,37 +153,11 @@ instance Show TypingError where
   show (ReconstructionError e) = "Reconstruction Error: " ++ show e
 instance Show ReconstructionError where
   show (MissingVariableTypeInNamingContext name ctx) = concat ["missing variable in naming context: variable: ", show name, ", NamingContext: ", show ctx]
-  show (UnifyError e) = "Unify Error: " ++ show e
--- instance UnName Type where
---   unName NatType = return NatType
---   unName BoolType = return BoolType
---   unName (VariableType ty) =  do
---     maybei <- V.findIndex isBound <$> getEff #context
---     case maybei of
---       Just i  -> return . VariableType $ #id @= i <: nil
---       Nothing -> do
---         ctx <- getEff #context
---         throwError $ MissingTypeVariableInNamingContext (ty ^. #id) ctx
---     where
---       isBound (x, VariableTypeBind) | x == ty ^. #id = True
---       isBound _ = False
---   unName (ArrowType ty) = do
---     domain <- unName $ ty ^. #domain
---     codomain <- unName $ ty ^. #codomain
---     return . ArrowType $ #domain @= domain <: #codomain @= codomain <: nil
+  show (UnifyError ctx t e) = concat ["NamingContext = ", show ctx, ", Term = ", show t, ": Unify Error: ", show e]
+instance Show UnifyError where
+  show (ConstraintsConflict c) = concat ["failed to resolve conflicts: constraints", show c]
+  show (UnifierInsertConflict n ty unifier) = concat ["conflict unifier: TypeVariable = ", show n, ", Type = ", show ty, ", Unifier = ", show unifier]
 
---   restoreName NatType = return NatType
---   restoreName BoolType = return BoolType
---   restoreName (VariableType ty) = do
---     ctx <- getEff #context
---     case ctx V.!? (ty ^. #id) of
---       Just (name, _) -> return . VariableType $ #id @= name <: nil
---       Nothing        -> throwError $ MissingTypeVariableInNamingContext (ty ^. #id) ctx
---   restoreName (ArrowType ty) = do
---     domain <- restoreName $ ty ^. #domain
---     codomain <- restoreName $ ty ^. #codomain
---     return . ArrowType $ #domain @= domain <: #codomain @= codomain <: nil
- 
 instance UnName Term where
   unName Zero = return Zero
   unName (Succ t) = Succ <$> unName t
@@ -230,8 +206,9 @@ instance UnName Term where
     return . ImplicitAbstractionTerm $ #name @= x <: #body @= body <: nil
   unName (LetTerm t) = do
     let x = t ^. #name
-    ctx <- modifyEff #context (V.cons (x, ImplicitVariableTermBind)) >> getEff #context
+    ctx <- getEff #context
     body <- castEff $ evalStateEff @"context" (unName $ t ^. #body) ctx
+    modifyEff #context (V.cons (x, ImplicitVariableTermBind))
     t' <- unName $ t ^. #in
     return . LetTerm $ #name @= x <: #body @= body <: #in @= t' <: nil
 
@@ -277,8 +254,9 @@ instance UnName Term where
     return . ImplicitAbstractionTerm $ #name @= x <: #body @= body <: nil
   restoreName (LetTerm t) = do
     let x = t ^. #name
-    ctx <- modifyEff #context (V.cons (x, ImplicitVariableTermBind)) >> getEff #context
+    ctx <- getEff #context
     body <- castEff $ evalStateEff @"context" (restoreName $ t ^. #body) ctx
+    modifyEff #context (V.cons (x, ImplicitVariableTermBind))
     t' <- restoreName $ t ^. #in
     return . LetTerm $ #name @= x <: #body @= body <: #in @= t' <: nil
 
@@ -297,18 +275,21 @@ reconstruction :: UnNamedTerm -> Eff '["context" >: State NamingContext,  "fresh
 reconstruction Zero = return (NatType, Map.empty)
 reconstruction (Succ t) = do
   (ty, unifier1) <- reconstruction t
-  unifier2 <- castEff . mapEitherDef UnifyError . unify $ Set.singleton (ty, NatType)
-  unifier <- castEff . mapEitherDef UnifyError $ union unifier1 unifier2
+  ctx <- getEff #context
+  unifier2 <- castEff . mapEitherDef (UnifyError ctx (Succ t)) . unify $ Set.singleton (ty, NatType)
+  unifier <- castEff . mapEitherDef (UnifyError ctx (Succ t)) $ union unifier1 unifier2
   return (NatType, unifier)
 reconstruction (Pred t) = do
   (ty, unifier1) <- reconstruction t
-  unifier2 <- castEff . mapEitherDef UnifyError . unify $ Set.singleton (ty, NatType)
-  unifier <- castEff . mapEitherDef UnifyError $ union unifier1 unifier2
+  ctx <- getEff #context
+  unifier2 <- castEff . mapEitherDef (UnifyError ctx (Pred t)). unify $ Set.singleton (ty, NatType)
+  unifier <- castEff . mapEitherDef (UnifyError ctx (Pred t)) $ union unifier1 unifier2
   return (NatType, unifier)
 reconstruction (IsZero t) = do
   (ty, unifier1) <- reconstruction t
-  unifier2 <- castEff . mapEitherDef UnifyError . unify $ Set.singleton (ty, NatType)
-  unifier <- castEff . mapEitherDef UnifyError $ union unifier1 unifier2
+  ctx <- getEff #context
+  unifier2 <- castEff . mapEitherDef (UnifyError ctx (IsZero t)) . unify $ Set.singleton (ty, NatType)
+  unifier <- castEff . mapEitherDef (UnifyError ctx (IsZero t)) $ union unifier1 unifier2
   return (BoolType, unifier)
 reconstruction TRUE = return (BoolType, Map.empty)
 reconstruction FALSE = return (BoolType, Map.empty)
@@ -317,36 +298,77 @@ reconstruction (If t) = do
   (ty1, unifier1) <- castEff $ evalStateEff @"context" (reconstruction $ t ^. #cond) ctx
   (ty2, unifier2) <- castEff $ evalStateEff @"context" (reconstruction $ t ^. #then) ctx
   (ty3, unifier3) <- castEff $ evalStateEff @"context" (reconstruction $ t ^. #else) ctx
-  unifier4 <- castEff . mapEitherDef UnifyError . unify $ Set.fromList [(ty1, BoolType), (ty2, ty3)]
-  unifier <- castEff . mapEitherDef UnifyError $ unions [unifier1, unifier2, unifier3, unifier4]
-  let ty = leaveEff $ runReaderDef (instantiate ty2) unifier
-  return (ty, unifier)
+  unifier4 <- castEff . mapEitherDef (UnifyError ctx (If t)). unify $ Set.fromList [(ty1, BoolType), (ty2, ty3)]
+  unifier <- castEff . mapEitherDef (UnifyError ctx (If t)) $ unions [unifier1, unifier2, unifier3, unifier4]
+  return (instantiate unifier ty2, unifier)
 reconstruction (VariableTerm t) = do
   ctx <- getEff #context
   case ctx V.!? t of
+    Just (_, VariableTermBind (TypeScheme ty)) -> do
+      unifier <- foldM (\m v -> freshTypeVariable >>= \newv -> return $ Map.insert v (VariableType newv) m) Map.empty (ty ^. #schemes)
+      return (instantiate unifier (ty ^. #type), Map.empty)
     Just (_, VariableTermBind ty) -> return (ty, Map.empty)
     _ -> throwError $ MissingVariableTypeInNamingContext t ctx
 reconstruction (AbstractionTerm t) = do
   modifyEff #context $ V.cons (t ^. #name, VariableTermBind $ t ^. #type)
   (bodyty, unifier) <- reconstruction $ t ^. #body
-  let ty = leaveEff $ runReaderDef (instantiate (t ^. #type)) unifier
-  return (ArrowType $ #domain @= ty <: #codomain @= bodyty <: nil, unifier)
+  let ty = ArrowType $ #domain @= instantiate unifier (t ^. #type) <: #codomain @= bodyty <: nil
+  return (ty, unifier)
 reconstruction (ApplicationTerm t)  = do
   ctx <- getEff #context
   (ty1, unifier1) <- castEff $ evalStateEff @"context" (reconstruction $ t ^. #function) ctx
   (ty2, unifier2) <- castEff $ evalStateEff @"context" (reconstruction $ t ^. #argument) ctx
   typevar <- VariableType <$> freshTypeVariable
-  unifier3 <- castEff . mapEitherDef UnifyError . unify $ Set.singleton (ty1, ArrowType $ #domain @= ty2 <: #codomain @= typevar <: nil)
-  unifier <- castEff . mapEitherDef UnifyError $ unions [unifier1, unifier2, unifier3]
-  let ty = leaveEff $ runReaderDef (instantiate typevar) unifier
-  return (ty, unifier)
+  unifier3 <- castEff . mapEitherDef (UnifyError ctx (ApplicationTerm t)) . unify $ Set.singleton (ty1, ArrowType $ #domain @= ty2 <: #codomain @= typevar <: nil)
+  unifier <- castEff . mapEitherDef (UnifyError ctx (ApplicationTerm t)) $ unions [unifier1, unifier2, unifier3]
+  return (instantiate unifier typevar, unifier)
 reconstruction (FixTerm f) = do
   (ty, unifier1) <- reconstruction f
   typevar <- VariableType <$> freshTypeVariable
-  unifier2 <- castEff . mapEitherDef UnifyError . unify $ Set.singleton (ty, ArrowType $ #domain @= typevar <: #codomain @= typevar <: nil)
-  unifier <- castEff . mapEitherDef UnifyError $ union unifier1 unifier2
-  let ty = leaveEff $ runReaderDef (instantiate typevar) unifier
+  ctx <- getEff #context
+  unifier2 <- castEff . mapEitherDef (UnifyError ctx (FixTerm f)) . unify $ Set.singleton (ty, ArrowType $ #domain @= typevar <: #codomain @= typevar <: nil)
+  unifier <- castEff . mapEitherDef (UnifyError ctx (FixTerm f)) $ union unifier1 unifier2
+  return (instantiate unifier typevar, unifier)
+reconstruction (PairTerm t1 t2) = do
+  ctx <- getEff #context
+  (ty1, unifier1) <- castEff $ evalStateEff @"context" (reconstruction t1) ctx
+  (ty2, unifier2) <- castEff $ evalStateEff @"context" (reconstruction t2) ctx
+  unifier <- castEff . mapEitherDef (UnifyError ctx (PairTerm t1 t2)) $ union unifier1 unifier2
+  return (instantiate unifier (PairType ty1 ty2), unifier)
+reconstruction (ImplicitAbstractionTerm t) = do
+  typevar <- VariableType <$> freshTypeVariable
+  modifyEff #context $ V.cons (t ^. #name, VariableTermBind typevar)
+  (bodyty, unifier) <- reconstruction $ t ^. #body
+  let ty = ArrowType $ #domain @= instantiate unifier typevar <: #codomain @= bodyty <: nil
   return (ty, unifier)
+reconstruction (LetTerm t) = do
+  ctx <- getEff #context
+  (ty1, unifier1) <- castEff $ evalStateEff @"context" (reconstruction $ t ^. #body) ctx
+  let typevariables = leaveEff $ runReaderDef (freeVariable ty1) (extractVariableTypeFromNamingContext ctx)
+  modifyEff #context $ V.cons (t ^. #name, VariableTermBind $ TypeScheme (#schemes @= typevariables <: #type @= ty1 <: nil))
+  (ty2, unifier2) <- reconstruction $ t ^. #in
+  ctx' <- getEff #context
+  unifier <- castEff . mapEitherDef (UnifyError ctx' (LetTerm t)) $ union unifier1 unifier2
+  return (ty2, unifier)
+
+extractVariableType :: Type -> Set.Set VariableType
+extractVariableType (VariableType n) = Set.singleton n
+extractVariableType (ArrowType ty) = extractVariableType (ty ^. #domain) `Set.union` extractVariableType (ty ^. #codomain)
+extractVariableType (PairType ty1 ty2) = extractVariableType ty1 `Set.union` extractVariableType ty2
+extractVariableType _ = Set.empty
+
+extractVariableTypeFromNamingContext :: NamingContext -> Set.Set VariableType
+extractVariableTypeFromNamingContext = foldr f Set.empty
+  where
+    f (_, VariableTermBind ty) = Set.union (extractVariableType ty)
+    f _ = id
+
+freeVariable :: Type -> Eff '[ReaderDef (Set.Set VariableType) ] (Set.Set VariableType)
+freeVariable (VariableType n) = asks (bool (Set.singleton n) Set.empty . Set.member n)
+freeVariable (ArrowType ty) = Set.union <$> freeVariable (ty ^. #domain) <*> freeVariable (ty ^. #codomain)
+freeVariable (PairType ty1 ty2) = Set.union <$> freeVariable ty1 <*> freeVariable ty2
+freeVariable _ = return Set.empty
+
 
 leaveReconstruction :: NamingContext -> UnNamedTerm -> Either ReconstructionError Type
 leaveReconstruction ctx t = fmap fst . leaveEff . runEitherDef $ evalStateEff @"fresh" (evalStateEff @"context" (reconstruction t) ctx) 0
@@ -354,7 +376,7 @@ leaveReconstruction ctx t = fmap fst . leaveEff . runEitherDef $ evalStateEff @"
 -- ty == ty' is not sufficient, for example, VariableType n != NatType but we should refine it
 insert :: VariableType -> Type -> Unifier -> Eff '[EitherDef UnifyError] Unifier
 insert n ty unifier = case unifier Map.!? n of
-  Just ty' -> if ty == ty' then return unifier else throwError Conflict
+  Just ty' -> if ty == ty' then return unifier else throwError $ UnifierInsertConflict n ty unifier
   Nothing -> return $ Map.insert n ty unifier
 
 union :: Unifier -> Unifier -> Eff '[EitherDef UnifyError] Unifier
@@ -370,33 +392,38 @@ unify c = case Set.lookupMin c of
   Just (v@(VariableType n), t) | not (occurCheck v t) -> unify (Set.deleteMin c) >>= insert n t
   Just (s, v@(VariableType n)) | not (occurCheck v s) -> unify (Set.deleteMin c) >>= insert n s
   Just (ArrowType ty1, ArrowType ty2) -> unify . Set.insert (ty1 ^. #domain, ty2 ^. #domain) . Set.insert (ty1 ^. #codomain, ty2 ^. #codomain) $ Set.deleteMin c
-  _ -> throwError Conflict
+  _ -> throwError $ ConstraintsConflict c
   where
     occurCheck v t@(VariableType _) = v == t
     occurCheck v (ArrowType ty) = occurCheck v (ty ^. #domain) || occurCheck v (ty ^. #codomain)
     occurCheck _ _ = False
 
 -- TODO: infinite loop risk, x = y = z
-refineUnifer :: Unifier -> Eff '[EitherDef UnifyError] Unifier
-refineUnifer sigma = traverse (castEff . flip runReaderDef sigma . instantiate) sigma
+refineUnifer :: Unifier -> Unifier
+refineUnifer sigma = instantiate sigma <$> sigma
 
-instantiate :: Type -> Eff '[ReaderDef Unifier] Type
-instantiate (VariableType name) = do
+instantiate :: Unifier -> Type -> Type
+instantiate unifier ty = leaveEff $ runReaderDef (instantiate' ty) unifier
+instantiate' :: Type -> Eff '[ReaderDef Unifier] Type
+instantiate' (VariableType name) = do
   sigma <- ask
   case sigma Map.!? name of
-    Just ty -> instantiate ty
+    Just ty -> instantiate' ty
     Nothing -> return $ VariableType name
-instantiate (ArrowType ty') = do
-  domain <- instantiate $ ty' ^. #domain
-  codomain <- instantiate $ ty' ^. #codomain
+instantiate' (ArrowType ty') = do
+  domain <- instantiate' $ ty' ^. #domain
+  codomain <- instantiate' $ ty' ^. #codomain
   return . ArrowType $ #domain @= domain <: #codomain @= codomain <: nil
-instantiate t = return t
+instantiate' (PairType ty1 ty2) = PairType <$> instantiate' ty1 <*> instantiate' ty2
+instantiate' t = return t
 
 unify' :: Constraints -> Eff '[EitherDef UnifyError] Unifier
-unify' = unify >=> refineUnifer
+unify' = fmap refineUnifer . unify
 
 typeOf :: NamingContext -> UnNamedTerm -> Eff '[EitherDef TypingError] Type
 typeOf ctx t = fmap fst . mapEitherDef  ReconstructionError $ evalStateEff @"fresh"   (evalStateEff @"context" (reconstruction t) ctx) 0
-  -- sigma <- mapEitherDef UnifyError $ unify' c
-  -- castEff $ runReaderDef (instantiate ty) sigma
 
+typeOf' :: NamingContext -> NamedTerm -> Either Errors Type
+typeOf' ctx t = leaveEff . runEitherDef $ do
+  t' <- mapEitherDef UnNameError $ evalStateEff @"context" (unName t) ctx
+  mapEitherDef TypingError $ typeOf ctx t'
