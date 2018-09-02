@@ -25,7 +25,6 @@ import Data.Extensible.Effect.Default
 
 import SString
 
-import qualified Debug.Trace as D
 
 
 type DeBrujinIndex = Int
