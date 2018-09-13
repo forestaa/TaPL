@@ -12,123 +12,153 @@ module TaPL.SystemF where
 
 
 import RIO  
+import qualified RIO.Map as Map
 import qualified RIO.Vector as V
 
-import Control.Lens hiding ((:>), (^.))
 import Control.Monad.Error.Class
--- import Control.Monad.State.Strict
+import Control.Lens hiding ((:>), (^.))
 import Data.Extensible
 import Data.Extensible.Effect.Default
 
+import MapEitherDef
 import SString
 
 
 type DeBrujinIndex = Int
 type NamingContext = Vector (SString, Binding)
 data Binding = 
-    ConstTermBind UnNamedType 
-  | VariableTermBind UnNamedType 
+    ConstTermBind
+  | VariableTermBind
   | ConstTypeBind 
   | VariableTypeBind 
   deriving (Show, Eq)
 data NamingContextError a = 
     MissingVariableInNamingContext (Named a) NamingContext 
   | MissingTypeVariableInNamingContext (Named a) NamingContext
-type UnNameError = NamingContextError 'True
-type RestoreNameError = NamingContextError 'False
+deriving instance Eq (Named a) => Eq (NamingContextError a)
+instance Show (Named a) => Show (NamingContextError a) where
+  show (MissingVariableInNamingContext name ctx) = concat ["missing variable in naming context: variable: ", show name, ", NamingContext: ", show ctx]
+  show (MissingTypeVariableInNamingContext name ctx) = concat ["missing type variable in naming context: type variable: ", show name, ", NamingContext: ", show ctx]
+data Errors = 
+    UnNameError UnNameError
+  | TypingError TypingError
+  | RestoreNameError RestoreNameError
+  deriving (Eq)
+instance Show Errors where
+  show (UnNameError e) = "UnName Error: " ++ show e
+  show (TypingError e) = "Typing Error: " ++ show e
+  show (RestoreNameError e) = "RestoreName Error: " ++ show e
+
 
 type family Named (a :: Bool) where
   Named 'True  = SString
   Named 'False = DeBrujinIndex
-type Variable a = Record '["id" :> Named a]
--- type NamedVariable = Variable 'True
-type NameLessVariable = Variable 'False
+type NameLessVariable = Named 'False
 
+type family Not (a :: Bool) where
+  Not 'True = 'False
+  Not 'False = 'True
 
-class UnName (f :: Bool -> *) where
-  unName      :: f 'True -> Eff '[ReaderDef NamingContext, EitherDef UnNameError] (f 'False)
-  restoreName :: f 'False -> Eff '[ReaderDef NamingContext, EitherDef RestoreNameError] (f 'True)
+class NameLess (f :: Bool -> *) where
+  nameless :: f a -> Eff ["findVarTerm" >: ReaderEff (NamingContext -> Named a -> Maybe (Named (Not a))), "findVarType" >: ReaderEff (NamingContext -> Named a -> Maybe (Named (Not a))), ReaderDef NamingContext, EitherDef (NamingContextError a)] (f (Not a))
+type UnNameError = NamingContextError 'True
+unName :: NameLess f => f 'True -> Eff '[ReaderDef NamingContext, EitherDef UnNameError] (f 'False)
+unName ty = runReaderEff @"findVarType" (runReaderEff @"findVarTerm" (nameless ty) findvarterm) findvartype
+  where
+    findvarterm ctx x = V.findIndex isBound ctx
+      where
+        isBound (x', VariableTermBind) | x == x' = True
+        isBound _ = False
+    findvartype ctx x = V.findIndex isBound ctx
+      where
+        isBound (x', VariableTypeBind) | x == x' = True
+        isBound _ = False
+type RestoreNameError = NamingContextError 'False
+restoreName :: NameLess f => f 'False -> Eff '[ReaderDef NamingContext, EitherDef RestoreNameError] (f 'True)
+restoreName ty = runReaderEff @"findVarType" (runReaderEff @"findVarTerm" (nameless ty) findvar) findvar
+  where
+    findvar ctx x = fst <$> ctx V.!? x
+
+leaveUnName :: NameLess f => NamingContext -> f 'True -> Either UnNameError (f 'False)
+leaveUnName ctx t = leaveEff . runEitherDef $ runReaderDef (unName t) ctx
+leaveRestoreName :: NameLess f => NamingContext -> f 'False -> Either RestoreNameError (f 'True)
+leaveRestoreName ctx t = leaveEff . runEitherDef $ runReaderDef (restoreName t) ctx
+leaveUnRestoreName :: NameLess f => NamingContext -> f 'True -> Either Errors (f 'True)
+leaveUnRestoreName ctx t = do
+  t' <- mapLeft UnNameError $ leaveUnName ctx t
+  mapLeft RestoreNameError $ leaveRestoreName ctx t'
+
 class IndexOperation (f :: Bool -> *) where
   indexMap :: DeBrujinIndex -> f 'False -> Eff ["onvar" >: ReaderEff (DeBrujinIndex -> NameLessVariable -> f 'False), "ontype" >: ReaderEff (DeBrujinIndex -> UnNamedType -> UnNamedType)] (f 'False)
 class IndexOperation f => IndexShift (f :: Bool -> *) where
   indexShift :: DeBrujinIndex -> f 'False -> f 'False
-  indexShift d = indexShift' d 0
+  indexShift = flip indexShift' 0
   indexShift' :: DeBrujinIndex -> DeBrujinIndex -> f 'False -> f 'False
-  -- indexShift d = leaveEff . (`runReaderDef` d) . indexShift' 0
-  -- indexShift' :: DeBrujinIndex -> f 'False -> Eff '[ReaderDef DeBrujinIndex] (f 'False)
-  -- indexShift' :: DeBrujinIndex -> f 'False -> f 'False
 class IndexOperation f => Substitution (f :: Bool -> *) (g :: Bool -> *) where
   subst :: DeBrujinIndex -> g 'False -> f 'False -> f 'False
-  -- subst j s = leaveEff . (`runReaderDef` s) . subst' j
-  -- subst' :: DeBrujinIndex -> f 'False -> Eff '[ReaderDef (g 'False)] (f 'False)
-betaReduction :: (IndexShift f, Substitution f f) => f 'False -> f 'False -> f 'False
+betaReduction :: (IndexShift f, IndexShift g, Substitution f g) => g 'False -> f 'False -> f 'False
 betaReduction s t = indexShift (-1) $ subst 0 (indexShift 1 s) t
+leaveBetaReduction :: (NameLess f, NameLess g, IndexShift f, IndexShift g, Substitution f g) => NamingContext -> g 'True -> f 'True -> Either Errors (f 'True)
+leaveBetaReduction ctx s t = do
+  s1 <- mapLeft UnNameError $ leaveUnName ctx s
+  t1 <- mapLeft UnNameError $ leaveUnName ctx t
+  let t' = betaReduction s1 t1
+  mapLeft RestoreNameError $ leaveRestoreName ctx t'
+
 
 
 data Type a = 
-    -- PrimitiveType SString
-    VariableType (Variable a)
+    PrimitiveType SString
+  | NatType
+  | VariableType (Named a)
   | ArrowType (Record '["domain" :> Type a, "codomain" :> Type a])
+  | RecordType (Map.Map SString (Type a))
   | AllType (Record '["name" :> SString, "body" :> Type a])
   | ExistType (Record '["name" :> SString, "body" :> Type a])
 deriving instance (Eq (Type a), Eq (Named a)) => Eq (Type a)
 instance (Show (Named a), Show (Type a)) => Show (Type a) where
-  -- show (PrimitiveType ty) = show ty
-  show (VariableType ty)  = show (ty ^. #id)
+  show (PrimitiveType ty) = show ty
+  show (NatType) = "Nat"
+  show (VariableType ty)  = show ty
   show (ArrowType ty)     = concat ["(", show (ty ^. #domain), " -> ", show (ty ^. #codomain), ")"]
+  show (RecordType ty) = concat ["{", Map.foldrWithKey (\field ty' acc -> concat [show field, ": ", show ty', ", ", acc]) "" ty, "}"]
   show (AllType ty) = concat ["(∀", show (ty ^. #name), ".", show (ty ^. #body), ")"]
   show (ExistType ty) = concat ["(∃", show (ty ^. #name), ".", show (ty ^. #body), ")"]
 type NamedType = Type 'True
 type UnNamedType = Type 'False
 
 
-instance UnName Type where
-  -- unName (PrimitiveType ty) = return $ PrimitiveType ty
-  unName (VariableType ty) =  do
+instance NameLess Type where
+  nameless (PrimitiveType ty) = return $ PrimitiveType ty
+  nameless NatType = return NatType
+  nameless (VariableType x) = do
     ctx <- ask
-    case V.findIndex isBound ctx of
-      Just i  -> return . VariableType $ #id @= i <: nil
-      Nothing -> throwError $ MissingTypeVariableInNamingContext (ty ^. #id) ctx
-    where
-      isBound (x, VariableTypeBind) | x == ty ^. #id = True
-      isBound _ = False
-  unName (ArrowType ty) = do
-    domain <- unName $ ty ^. #domain
-    codomain <- unName $ ty ^. #codomain
+    findvar <- askEff #findVarType
+    case findvar ctx x of
+      Just x' -> return $ VariableType x'
+      Nothing -> throwError $ MissingTypeVariableInNamingContext x ctx
+  nameless (ArrowType ty) = do
+    domain <- nameless $ ty ^. #domain
+    codomain <- nameless $ ty ^. #codomain
     return . ArrowType $ #domain @= domain <: #codomain @= codomain <: nil
-  unName (AllType ty) = do
+  nameless (RecordType ty) = RecordType <$> mapM nameless ty
+  nameless (AllType ty) = do
     let x  = ty ^. #name
-    body <- local (V.cons (x, VariableTypeBind)) $ unName (ty ^. #body)
+    body <- local (V.cons (x, VariableTypeBind)) $ nameless (ty ^. #body)
     return . AllType $ #name @= x <: #body @= body <: nil
-  unName (ExistType ty) = do
+  nameless (ExistType ty) = do
     let x  = ty ^. #name
-    body <- local (V.cons (x, VariableTypeBind)) $ unName (ty ^. #body)
-    return . ExistType $ #name @= x <: #body @= body <: nil
-
-  -- restoreName (PrimitiveType ty) = return $ PrimitiveType ty
-  restoreName (VariableType ty) = do
-    ctx <- ask
-    case ctx V.!? (ty ^. #id) of
-      Just (name, _) -> return . VariableType $ #id @= name <: nil
-      Nothing        -> throwError $ MissingTypeVariableInNamingContext (ty ^. #id) ctx
-  restoreName (ArrowType ty) = do
-    domain <- restoreName $ ty ^. #domain
-    codomain <- restoreName $ ty ^. #codomain
-    return . ArrowType $ #domain @= domain <: #codomain @= codomain <: nil
-  restoreName (AllType ty) = do
-    let x  = ty ^. #name
-    body <- local (V.cons (x, VariableTypeBind)) $ restoreName (ty ^. #body)
-    return . AllType $ #name @= x <: #body @= body <: nil
-  restoreName (ExistType ty) = do
-    let x  = ty ^. #name
-    body <- local (V.cons (x, VariableTypeBind)) $ restoreName (ty ^. #body)
+    body <- local (V.cons (x, VariableTypeBind)) $ nameless (ty ^. #body)
     return . ExistType $ #name @= x <: #body @= body <: nil
 instance IndexOperation Type where
-  indexMap c (VariableType ty) = asksEff #onvar (\onvar -> onvar c ty)
+  indexMap _ ty@(PrimitiveType _) = return ty
+  indexMap _ NatType = return NatType
+  indexMap c (VariableType x) = asksEff #onvar (\onvar -> onvar c x)
   indexMap c (ArrowType ty) = do
     domain <- indexMap c $ ty ^. #domain
     codomain <- indexMap c $ ty ^. #codomain
     return . ArrowType $ ty & #domain .~ domain & #codomain .~ codomain
+  indexMap c (RecordType ty) = RecordType <$> mapM (indexMap c) ty
   indexMap c (AllType ty)   = do 
     body <- indexMap (c+1) $ ty ^. #body
     return . AllType $ ty & #body .~ body
@@ -138,161 +168,113 @@ instance IndexOperation Type where
 instance IndexShift Type where
   indexShift' d c ty = leaveEff $ runReaderEff @"ontype" (runReaderEff @"onvar" (indexMap c ty) onvar) undefined
     where
-      onvar c var | var ^. #id < c = VariableType var
-                  | otherwise = VariableType $ var & #id +~ d
-  -- indexShift' _ _  (PrimitiveType ty) = PrimitiveType ty
-  -- indexShift' c (VariableType ty) 
-  --   | ty ^. #id < c = return $ VariableType ty 
-  --   | otherwise =  asks $ \d -> VariableType $ ty & #id +~ d
-  -- indexShift' c (ArrowType ty) = do
-  --   domain <- indexShift' c $ ty ^. #domain
-  --   codomain <- indexShift' c $ ty ^. #codomain
-  --   return . ArrowType $ ty & #domain .~ domain & #codomain .~ codomain
-  -- indexShift' c (AllType ty)   = do 
-  --   body <- indexShift' (c+1) $ ty ^. #body
-  --   return . AllType $ ty & #body .~ body
-  -- indexShift' c (ExistType ty)   = do 
-  --   body <- indexShift' (c+1) $ ty ^. #body
-  --   return . ExistType $ ty & #body .~ body
+      onvar n var | var < n = VariableType var
+                  | otherwise = VariableType $ var + d
 instance Substitution Type Type where
   subst j s t = leaveEff $ runReaderEff @"ontype" (runReaderEff @"onvar" (indexMap j t) onvar) undefined
     where
-      onvar j var | var ^. #id == j = indexShift j s
+      onvar n var | var == n = indexShift n s
                   | otherwise = VariableType var
-  -- subst _ _ (PrimitiveType ty) = PrimitiveType ty
-  -- subst' j (VariableType ty)
-  --   | ty ^. #id == j = asks $ indexShift j
-  --   | otherwise = return $ VariableType ty
-  -- subst' j (ArrowType ty) = do
-  --   domain <- subst' j $ ty ^. #domain
-  --   codomain <- subst' j $ ty ^. #codomain
-  --   return . ArrowType $ ty & #domain .~ domain & #codomain .~ codomain
-  -- subst' j (AllType ty) = do
-  --   body <- subst' (j+1) $ ty ^. #body
-  --   return . AllType $ ty & #body .~ body
-  -- subst' j (ExistType ty) = do
-  --   body <- subst' (j+1) $ ty ^. #body
-  --   return . ExistType $ ty & #body .~ body
 
 
 data Term a =
     ConstTerm SString
-  | VariableTerm (Variable a)
+  | Zero
+  | Succ (Term a)
+  | VariableTerm (Named a)
   | AbstractionTerm (Record '["name" :> SString, "type" :> Type a, "body" :> Term a])
   | ApplicationTerm (Record '["function" :> Term a, "argument" :> Term a])
+  | RecordTerm (Map.Map SString (Term a))
+  | ProjectionTerm (Record '["term" :> Term a, "label" :> SString])
   | TypeAbstractionTerm (Record '["name" :> SString, "body" :> Term a])
-  | TypeApplicationTerm (Record '["body" :> Term a, "type" :> Type a])
+  | TypeApplicationTerm (Record '["term" :> Term a, "type" :> Type a])
   | PackageTerm (Record '["type" :> Type a, "term" :> Term a, "exist" :> Type a])
-  | UnPackageTerm (Record '["name" :> SString, "type" :> SString, "body" :> Term a, "in" :> Term a])
+  | UnPackageTerm (Record '["type" :> SString, "name" :> SString, "body" :> Term a, "in" :> Term a])
 deriving instance (Eq (Term a), Eq (Type a), Eq (Named a)) => Eq (Term a)
 instance (Show (Named a), Show (Type a), Show (Term a)) => Show (Term a) where
   show (ConstTerm s) = show s
-  show (VariableTerm t) = show (t ^. #id)
+  show (Zero) = "0"
+  show (Succ t) = concat ["succ(", show t, ")"]
+  show (VariableTerm t) = show t
   show (AbstractionTerm t) = concat ["λ", show (t ^. #name), ":", show (t ^. #type), ".", show (t ^. #body)]
   show (ApplicationTerm t) = concat ["(", show (t ^. #function), " ", show (t ^. #argument), ")"]
+  show (RecordTerm fields) = concat ["{", Map.foldrWithKey (\field t' acc -> concat [show field, ": ", show t', ", ", acc]) "" fields, "}"]
+  show (ProjectionTerm t) = concat [show (t ^. #term), ".", show (t ^. #label)]
   show (TypeAbstractionTerm t) = concat ["λ", show (t ^. #name), ".", show (t ^. #body)]
-  show (TypeApplicationTerm t) = concat [show (t ^. #body), " [", show (t ^. #type) ,"]"]
+  show (TypeApplicationTerm t) = concat [show (t ^. #term), " [", show (t ^. #type) ,"]"]
   show (PackageTerm t) = concat ["{*", show (t ^. #type), ", ", show (t ^. #term), " as ", show (t ^. #exist)]
   show (UnPackageTerm t) = concat ["let {", show (t ^. #name), ", ", show (t ^. #type), "} = ", show (t ^. #body), " in ", show (t ^. #in)]
 type NamedTerm = Term 'True
 type UnNamedTerm = Term 'False
 
-instance UnName Term where
-  unName (ConstTerm s) = return $ ConstTerm s
-  unName (VariableTerm t) = do
-    ctx <- ask
-    case V.findIndex isBound ctx of
-      Just i  -> return . VariableTerm $ #id @= i <: nil
-      Nothing -> throwError $ MissingVariableInNamingContext (t ^. #id) ctx
-    where
-      isBound (x, VariableTermBind _) | x == t ^. #id = True
-      isBound _ = False
-  unName (AbstractionTerm t) = do
-    let x  = t ^. #name
-    ty <- unName $ t ^. #type
-    body <- local (V.cons (x, VariableTermBind ty)) $ unName (t ^. #body)
-    return . AbstractionTerm $ #name @= x <: #type @= ty <: #body @= body <: nil
-  unName (ApplicationTerm t) = do
-    t1 <- unName $ t ^. #function
-    t2 <- unName $ t ^. #argument
-    return . ApplicationTerm $ #function @= t1 <: #argument @= t2 <: nil
-  unName (TypeAbstractionTerm t) = do
-    body <- local (V.cons (t ^. #name, VariableTypeBind)) $ unName (t ^. #body)
-    return . TypeAbstractionTerm $ #name @= t ^. #name <: #body @= body <: nil
-  unName (TypeApplicationTerm t) = do
-    body <- unName $ t ^. #body
-    ty   <- unName $ t ^. #type
-    return . TypeApplicationTerm $ #body @= body <: #type @= ty <: nil
-  unName (PackageTerm t) = do
-    ty <- unName $ t ^. #type
-    term <- unName $ t ^. #term
-    exist <- unName $ t ^. #exist
-    return . PackageTerm $ #type @= ty <: #term @= term <: #exist @= exist <: nil
-  unName (UnPackageTerm t) = do
-    body <- unName $ t ^. #body
-    t' <- unName $ t ^. #in
-    return . UnPackageTerm $ #name @= t ^. #name <: #type @= t ^. #type <: #body @= body <: #in @= t' <: nil
 
-  restoreName (ConstTerm s) = return $ ConstTerm s
-  restoreName (VariableTerm t) = do
+instance NameLess Term where
+  nameless (ConstTerm s) = return $ ConstTerm s
+  nameless Zero = return Zero
+  nameless (Succ t) = Succ <$> nameless t
+  nameless (VariableTerm x) = do
     ctx <- ask
-    case ctx V.!? (t ^. #id) of
-      Just (name, _) -> return $ VariableTerm $ #id @= name <: nil
-      Nothing -> throwError $ MissingVariableInNamingContext (t ^. #id) ctx
-  restoreName (AbstractionTerm t) = do
+    findvar <- askEff #findVarTerm
+    case findvar ctx x of
+      Just x'  -> return $ VariableTerm x'
+      Nothing -> throwError $ MissingVariableInNamingContext x ctx
+  nameless (AbstractionTerm t) = do
     let x  = t ^. #name
-        ty = t ^. #type
-    ty' <- restoreName ty
-    body <- local (V.cons (x, VariableTermBind ty)) $ restoreName (t ^. #body)
-    return . AbstractionTerm $ #name @= x <: #type @= ty' <: #body @= body <: nil
-  restoreName (ApplicationTerm t) = do
-    t1 <- restoreName $ t ^. #function
-    t2 <- restoreName $ t ^. #argument
+    ty <- nameless $ t ^. #type
+    body <- local (V.cons (x, VariableTermBind)) $ nameless (t ^. #body)
+    return . AbstractionTerm $ #name @= x <: #type @= ty <: #body @= body <: nil
+  nameless (ApplicationTerm t) = do
+    t1 <- nameless $ t ^. #function
+    t2 <- nameless $ t ^. #argument
     return . ApplicationTerm $ #function @= t1 <: #argument @= t2 <: nil
-  restoreName (TypeAbstractionTerm t) = do
-    body <- local (V.cons (t ^. #name, VariableTypeBind)) $ restoreName (t ^. #body)
+  nameless (RecordTerm fields) = RecordTerm <$> mapM nameless fields
+  nameless (ProjectionTerm t) = do
+    term <- nameless $ t ^. #term
+    return . ProjectionTerm $ #term @= term <: #label @= t ^. #label <: nil
+  nameless (TypeAbstractionTerm t) = do
+    body <- local (V.cons (t ^. #name, VariableTypeBind)) $ nameless (t ^. #body)
     return . TypeAbstractionTerm $ #name @= t ^. #name <: #body @= body <: nil
-  restoreName (TypeApplicationTerm t) = do
-    body <- restoreName $ t ^. #body
-    ty   <- restoreName $ t ^. #type
-    return . TypeApplicationTerm $ #body @= body <: #type @= ty <: nil
-  restoreName (PackageTerm t) = do
-    ty <- restoreName $ t ^. #type
-    term <- restoreName $ t ^. #term
-    exist <- restoreName $ t ^. #exist
+  nameless (TypeApplicationTerm t) = do
+    term <- nameless $ t ^. #term
+    ty   <- nameless $ t ^. #type
+    return . TypeApplicationTerm $ #term @= term <: #type @= ty <: nil
+  nameless (PackageTerm t) = do
+    ty <- nameless $ t ^. #type
+    term <- nameless $ t ^. #term
+    exist <- nameless $ t ^. #exist
     return . PackageTerm $ #type @= ty <: #term @= term <: #exist @= exist <: nil
-  restoreName (UnPackageTerm t) = do
-    body <- restoreName $ t ^. #body
-    t' <- restoreName $ t ^. #in
-    return . UnPackageTerm $ #name @= t ^. #name <: #type @= t ^. #type <: #body @= body <: #in @= t' <: nil
+  nameless (UnPackageTerm t) = do
+    body <- nameless $ t ^. #body
+    t' <- local (V.cons (t ^. #name, VariableTermBind) . V.cons (t ^. #type, VariableTypeBind)) $ nameless (t ^. #in)
+    return . UnPackageTerm $ #type @= t ^. #type <: #name @= t ^. #name <: #body @= body <: #in @= t' <: nil
 instance IndexOperation Term where
   indexMap _ t@(ConstTerm _) = return t
+  indexMap _ Zero = return Zero
+  indexMap c (Succ t) = Succ <$> indexMap c t
   indexMap c (VariableTerm t) = asksEff #onvar (\onvar -> onvar c t)
-    -- | t ^. #id < c = return $ VariableTerm t
-    -- | otherwise = asks $ \d -> VariableTerm $ t & #id +~ d
   indexMap c (AbstractionTerm t) = do
     ty <- asksEff #ontype (\ontype -> ontype c $ t ^. #type)
-    -- ty <- indexMap c $ t ^. #type
     body <- indexMap (c+1) $ t ^. #body
     return . AbstractionTerm $ t & #type .~ ty & #body .~ body
   indexMap c (ApplicationTerm t) = do
     f <- indexMap c $ t ^. #function
     arg <- indexMap c $ t ^. #argument
     return . ApplicationTerm $ t & #function .~ f & #argument .~ arg
+  indexMap c (RecordTerm fields) = RecordTerm <$> mapM (indexMap c) fields
+  indexMap c (ProjectionTerm t) = do
+    term <- indexMap c $ t ^. #term
+    return . ProjectionTerm $ t & #term .~ term
   indexMap c (TypeAbstractionTerm t) = do
     body <- indexMap (c+1) $ t ^. #body
     return . TypeAbstractionTerm $ t & #body .~ body
   indexMap c (TypeApplicationTerm t) = do
-    body <- indexMap c $ t ^. #body
+    term <- indexMap c $ t ^. #term
     ty <- asksEff #ontype (\ontype -> ontype c $ t ^. #type)
-    -- ty <- indexMap c $ t ^. #type
-    return . TypeApplicationTerm $ t & #body .~ body & #type .~ ty
+    return . TypeApplicationTerm $ t & #term .~ term & #type .~ ty
   indexMap c (PackageTerm t) = do
-    -- ty <- indexShift' c $ t ^. #type
     ty <- asksEff #ontype (\ontype -> ontype c $ t ^. #type)
     term <- indexMap c $ t ^. #term
     exist <- asksEff #ontype (\ontype -> ontype c $ t ^. #exist)
-    -- exist <- indexMap c $ t ^. #exist
     return . PackageTerm $ t & #type .~ ty & #term .~ term & #exist .~ exist
   indexMap c (UnPackageTerm t) = do
     body <- indexMap c $ t ^. #body
@@ -301,70 +283,183 @@ instance IndexOperation Term where
 instance IndexShift Term where
   indexShift' d c t = leaveEff $ runReaderEff @"ontype" (runReaderEff @"onvar" (indexMap c t) onvar) ontype
     where
-      onvar c var | var ^. #id < c = VariableTerm var
-                  | otherwise = VariableTerm $ var & #id +~ d
+      onvar n var | var < n = VariableTerm var
+                  | otherwise = VariableTerm $ var + d
       ontype = indexShift' d
-  -- indexShift' _ t@(ConstTerm _) = return t
-  -- indexShift' c (VariableTerm t)
-  --   | t ^. #id < c = return $ VariableTerm t
-  --   | otherwise = asks $ \d -> VariableTerm $ t & #id +~ d
-  -- indexShift' c (AbstractionTerm t) = do
-  --   ty <- indexShift' c $ t ^. #type
-  --   body <- indexShift' (c+1) $ t ^. #body
-  --   return . AbstractionTerm $ t & #type .~ ty & #body .~ body
-  -- indexShift' c (ApplicationTerm t) = do
-  --   f <- indexShift' c $ t ^. #function
-  --   arg <- indexShift' c $ t ^. #argument
-  --   return . ApplicationTerm $ t & #function .~ f & #argument .~ arg
-  -- indexShift' c (TypeAbstractionTerm t) = do
-  --   body <- indexShift' (c+1) $ t ^. #body
-  --   return . TypeAbstractionTerm $ t & #body .~ body
-  -- indexShift' c (TypeApplicationTerm t) = do
-  --   body <- indexShift' c $ t ^. #body
-  --   ty <- indexShift' c $ t ^. #type
-  --   return . TypeApplicationTerm $ t & #body .~ body & #type .~ ty
-  -- indexShift' c (PackageTerm t) = do
-  --   ty <- indexShift' c $ t ^. #type
-  --   term <- indexShift' c $ t ^. #term
-  --   exist <- indexShift' c $ t ^. #exist
-  --   return . PackageTerm $ t & #type .~ ty & #term .~ term & #exist .~ exist
-  -- indexShift' c (UnPackageTerm t) = do
-  --   body <- indexShift' c $ t ^. #body
-  --   t' <- indexShift' (c+2) $ t ^. #in
-  --   return . UnPackageTerm $ t & #body .~ body & #in .~ t'
 instance Substitution Term Term where
   subst j s t = leaveEff $ runReaderEff @"ontype" (runReaderEff @"onvar" (indexMap j t) onvar) ontype
     where
-      onvar j var | var ^. #id == j = indexShift j s
+      onvar n var | var == n = indexShift n s
                   | otherwise = VariableTerm var
       ontype _ ty = ty
-  -- subst' _ t@(ConstTerm _) = return t
-  -- subst' j (VariableTerm t)
-  --   | t ^. #id == j = asks $ indexShift j
-  --   | otherwise = return $ VariableTerm t
-  -- subst' j (AbstractionTerm t) = do
-  --   body <- subst' (j+1) $ t ^. #body
-  --   return . AbstractionTerm $ t & #body .~ body
-  -- subst' j (ApplicationTerm t) = do
-  --   f <- subst' j $ t ^. #function
-  --   arg <- subst' j $ t ^. #argument
-  --   return . ApplicationTerm $ t & #function .~ f & #argument .~ arg
-  -- subst' j (TypeAbstractionTerm t) = do
-  --   body <- subst' (j+1) $ t ^. #body
-  --   return . TypeAbstractionTerm $ t & #body .~ body
-  -- subst' j (TypeApplicationTerm t) = do
-  --   body <- subst' j $ t ^. #body
-  --   return . TypeApplicationTerm $ t & #body .~ body
-  -- subst' j (PackageTerm t) = do
-  --   term <- subst' j $ t ^. #term
-  --   return . PackageTerm $ t & #term .~ term
-  -- subst' j (UnPackageTerm t) = do
-  --   body <- subst' j $ t ^. #body
-  --   t' <- subst' (j+2) $ t ^. #in
-  --   return . UnPackageTerm $ t & #body .~ body & #in .~ t'
-
 instance Substitution Term Type where
   subst j s t = leaveEff $ runReaderEff @"ontype" (runReaderEff @"onvar" (indexMap j t) onvar) ontype
     where
       onvar _ var = VariableTerm var
-      ontype j ty = subst j s ty
+      ontype n ty = subst n s ty
+
+
+isVal :: UnNamedTerm -> Bool
+isVal (ConstTerm _) = True
+isVal Zero = True
+isVal (Succ _) = True
+isVal (AbstractionTerm _) = True
+isVal (RecordTerm _) = True
+isVal (TypeAbstractionTerm _) = True
+isVal (PackageTerm _) = True
+isVal _ = False
+
+eval1 :: UnNamedTerm -> Maybe UnNamedTerm
+eval1 (Succ t) = Succ <$> eval1 t
+eval1 (ApplicationTerm t) = case t ^. #function of
+  (AbstractionTerm t') | isVal (t ^. #argument) -> Just $ betaReduction (t ^. #argument) (t' ^. #body)
+  v1 | isVal v1 -> (\t2' -> ApplicationTerm $ t & #argument .~ t2') <$> eval1 (t ^. #argument)
+  t1 -> (\t1' -> ApplicationTerm $ t & #function .~ t1') <$> eval1 t1
+eval1 (RecordTerm fields) = RecordTerm <$> evalFields fields
+  where
+    evalFields = (either (const Nothing) Just) . (Map.foldrWithKey evalField (Left Map.empty))
+    evalField key term (Left acc) = case eval1 term of
+      Just term' -> Right $ Map.insert key term' acc
+      Nothing -> Left $ Map.insert key term acc
+    evalField key term (Right acc) = Right $ Map.insert key term acc
+eval1 (ProjectionTerm t) = case t ^. #term of
+  RecordTerm fields -> fields Map.!? (t ^. #label)
+  t' -> (\term -> ProjectionTerm $ t & #term .~ term) <$> eval1 t'
+eval1 (TypeApplicationTerm t) = case t ^. #term of
+  (TypeAbstractionTerm t') -> Just $ betaReduction (t ^. #type) (t' ^. #body)
+  t1 -> (\t1' -> TypeApplicationTerm $ t & #term .~ t1') <$> eval1 t1
+eval1 (UnPackageTerm t) = case t ^. #body of
+  (PackageTerm t') | isVal (t' ^. #term) -> Just $ betaReduction (t' ^. #type) (betaReduction (indexShift 1 (t' ^. #term)) (t ^. #in))
+  t1 -> (\t1' -> UnPackageTerm $ t & #body .~ t1') <$> eval1 t1
+eval1 (PackageTerm t) = (\t2' -> PackageTerm $ t & #term .~ t2') <$> eval1 (t ^. #term)
+eval1 _ = Nothing
+
+eval :: UnNamedTerm -> UnNamedTerm
+eval t = case eval1 t of
+  Just t' -> eval t'
+  Nothing -> t
+
+leaveEval :: NamingContext -> NamedTerm -> Either Errors NamedTerm
+leaveEval ctx t = mapLeft UnNameError (leaveUnName ctx t) >>= mapLeft RestoreNameError . leaveRestoreName ctx . eval
+
+
+type TypingContext = Vector (SString, TypedBinding)
+typingContextToNamingContext :: TypingContext -> NamingContext
+typingContextToNamingContext = fmap (& _2 %~ f)
+  where
+    f (TypedConstTermBind _) = ConstTermBind
+    f (TypedVariableTermBind _) = VariableTermBind
+    f TypedConstTypeBind = ConstTypeBind
+    f TypedVariableTypeBind = VariableTypeBind
+data TypedBinding = 
+    TypedConstTermBind UnNamedType 
+  | TypedVariableTermBind UnNamedType 
+  | TypedConstTypeBind 
+  | TypedVariableTypeBind 
+  deriving (Show, Eq)
+data TypingError = 
+    MissingDeclarationInNamingContext SString TypingContext
+  | MissingVariableTypeInNamingContext DeBrujinIndex TypingContext
+  | NotMatchedTypeNatType NamedTerm NamedType
+  | NotMatchedTypeArrowType NamedTerm NamedType NamedTerm NamedType 
+  -- | NotMatchedTypeArrowType
+  | NotMatchedTypeProjectionNotRecord
+  | NotMatchedTypeProjectionLabelMissing
+  | NotMatchedTypeAllType
+  | NotMatchedTypeExistType NamedTerm NamedType
+  | NotMatchedTypeExistTypeInstantiate
+  | RestoreNameErrorWhileTypingError RestoreNameError
+  deriving (Eq)
+instance Show TypingError where
+  show (MissingDeclarationInNamingContext name ctx) = concat ["missing constant declaration in naming context: constant: ", show name, ", NamingContext: ", show ctx]
+  show (MissingVariableTypeInNamingContext name ctx) = concat ["missing variable in naming context: variable: ", show name, ", NamingContext: ", show ctx]
+  show (NotMatchedTypeNatType t ty) = concat ["failed to apply succ: t = ", show t, ": ", show ty]
+  show (NotMatchedTypeArrowType t1 ty1 t2 ty2) = concat ["failed to apply: t1 = ", show t1, ": ", show ty1, ", t2 = ", show t2, ": ", show ty2]
+  -- show (NotMatchedTypeArrowType) = "NotMatchedTypeArrowType"
+  show (NotMatchedTypeProjectionNotRecord) = "NotMatchedTypeProjectionNotRecord"
+  show (NotMatchedTypeProjectionLabelMissing) = "NotMatchedTypeProjectionLabelMissing"
+  show (NotMatchedTypeAllType) = "NotMatchedTypeAllType"
+  show (NotMatchedTypeExistType term ty) = concat ["Expected type: ExistType, Actual type: ", show ty, ", term = ", show term]
+  show (NotMatchedTypeExistTypeInstantiate) = "NotMatchedTypeExistTypeInstantiate"
+  show (RestoreNameErrorWhileTypingError e) = "RestorName Error While Typing Error: " ++ show e
+
+typing :: UnNamedTerm -> Eff '[ReaderDef TypingContext, EitherDef TypingError] UnNamedType
+typing (ConstTerm s) = do
+  bind <- asks $ fmap (^. _2) . V.find ((==) s . (^. _1))
+  case bind of
+    Just (TypedConstTermBind ty) -> return ty
+    _ -> ask >>= throwError . MissingDeclarationInNamingContext s
+typing Zero = return NatType
+typing (Succ t) = do
+  ty <- typing t
+  case ty of
+    NatType -> return NatType
+    _ -> do
+      ctx <- asks typingContextToNamingContext
+      t' <- castEff . mapEitherDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName t) ctx
+      ty' <- castEff . mapEitherDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName ty) ctx
+      throwError $ NotMatchedTypeNatType t' ty'
+typing (VariableTerm t) = do
+  ctx <- ask
+  case ctx V.!? t of
+    Just (_, TypedVariableTermBind ty) -> return $ indexShift (t+1) ty
+    _ -> throwError $ MissingVariableTypeInNamingContext t ctx
+typing (AbstractionTerm t) = do
+  codomain <- local (V.cons (t ^. #name, TypedVariableTermBind (t ^. #type))) $ typing (t ^. #body)
+  return . ArrowType $ #domain @= t ^. #type <: #codomain @= indexShift (-1) codomain <: nil
+typing (ApplicationTerm t) = do
+  ty1 <- typing $ t ^. #function
+  ty2 <- typing $ t ^. #argument
+  case ty1 of
+    ArrowType t' | t' ^. #domain == ty2 -> return $ t' ^. #codomain
+    _ -> do
+      ctx <- asks typingContextToNamingContext
+      t1'  <- castEff . mapEitherDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName $ t ^. #function) ctx
+      ty1' <- castEff . mapEitherDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName ty1) ctx
+      t2'  <- castEff . mapEitherDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName $ t ^. #argument) ctx
+      ty2' <- castEff . mapEitherDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName ty2) ctx
+      throwError $ NotMatchedTypeArrowType t1' ty1' t2' ty2'
+typing (RecordTerm fields) = RecordType <$> mapM typing fields
+typing (ProjectionTerm t) = do
+  ty <- typing $ t ^. #term
+  case ty of
+    RecordType fields -> case fields Map.!? (t ^. #label) of
+      Just ty' -> return ty'
+      Nothing -> throwError NotMatchedTypeProjectionLabelMissing
+    _ -> throwError NotMatchedTypeProjectionNotRecord
+typing (TypeAbstractionTerm t) = do
+  body <- local (V.cons (t ^. #name, TypedVariableTypeBind)) $ typing (t ^. #body)
+  return . AllType $ #name @= t ^. #name <: #body @= body <: nil
+typing (TypeApplicationTerm t) = do
+  term <- typing $ t ^. #term
+  case term of
+    AllType t' -> return $ betaReduction (t ^. #type) (t' ^. #body)
+    _ -> throwError NotMatchedTypeAllType
+typing (PackageTerm t) = do
+  case t ^. #exist of
+    ExistType ty -> do
+      term <- typing $ t ^. #term
+      if term == betaReduction (t ^. #type) (ty ^. #body)
+        then return $ t ^. #exist
+        else throwError NotMatchedTypeExistTypeInstantiate
+    ty -> do
+      ctx <- asks typingContextToNamingContext
+      ty' <- castEff . mapEitherDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName ty) ctx
+      t' <- castEff . mapEitherDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName (PackageTerm t)) ctx
+      throwError $ NotMatchedTypeExistType t' ty'
+typing (UnPackageTerm t) = do
+  body <- typing $ t ^. #body
+  case body of
+    ExistType ty -> indexShift (-2) <$> local (V.cons (t ^. #name, TypedVariableTermBind (ty ^. #body)) . V.cons (t ^. #type, TypedVariableTypeBind)) (typing (t ^. #in))
+    ty -> do
+      ctx <- asks typingContextToNamingContext
+      ty' <- castEff . mapEitherDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName ty) ctx
+      t' <- castEff . mapEitherDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName (UnPackageTerm t)) ctx
+      throwError $ NotMatchedTypeExistType t' ty'
+
+leaveTyping :: TypingContext -> NamedTerm -> Either Errors NamedType
+leaveTyping ctx t = do
+  let ctx' = typingContextToNamingContext ctx
+  t1 <- mapLeft UnNameError $ leaveUnName ctx' t
+  t' <- mapLeft TypingError . leaveEff . runEitherDef $ runReaderDef (typing t1) ctx
+  mapLeft RestoreNameError $ leaveRestoreName ctx' t'
