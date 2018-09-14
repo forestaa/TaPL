@@ -24,6 +24,7 @@ dependencies:
 - containers
 - extensible
 - lens
+- monad-skeleton
 - mtl
 - rio
 

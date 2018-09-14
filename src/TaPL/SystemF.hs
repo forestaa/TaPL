@@ -20,7 +20,7 @@ import Control.Lens hiding ((:>), (^.))
 import Data.Extensible
 import Data.Extensible.Effect.Default
 
-import MapEitherDef
+import MapLeftEff
 import SString
 
 
@@ -396,8 +396,8 @@ typing (Succ t) = do
     NatType -> return NatType
     _ -> do
       ctx <- asks typingContextToNamingContext
-      t' <- castEff . mapEitherDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName t) ctx
-      ty' <- castEff . mapEitherDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName ty) ctx
+      t' <- castEff . mapLeftDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName t) ctx
+      ty' <- castEff . mapLeftDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName ty) ctx
       throwError $ NotMatchedTypeNatType t' ty'
 typing (VariableTerm t) = do
   ctx <- ask
@@ -414,10 +414,10 @@ typing (ApplicationTerm t) = do
     ArrowType t' | t' ^. #domain == ty2 -> return $ t' ^. #codomain
     _ -> do
       ctx <- asks typingContextToNamingContext
-      t1'  <- castEff . mapEitherDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName $ t ^. #function) ctx
-      ty1' <- castEff . mapEitherDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName ty1) ctx
-      t2'  <- castEff . mapEitherDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName $ t ^. #argument) ctx
-      ty2' <- castEff . mapEitherDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName ty2) ctx
+      t1'  <- castEff . mapLeftDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName $ t ^. #function) ctx
+      ty1' <- castEff . mapLeftDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName ty1) ctx
+      t2'  <- castEff . mapLeftDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName $ t ^. #argument) ctx
+      ty2' <- castEff . mapLeftDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName ty2) ctx
       throwError $ NotMatchedTypeArrowType t1' ty1' t2' ty2'
 typing (RecordTerm fields) = RecordType <$> mapM typing fields
 typing (ProjectionTerm t) = do
@@ -444,8 +444,8 @@ typing (PackageTerm t) = do
         else throwError NotMatchedTypeExistTypeInstantiate
     ty -> do
       ctx <- asks typingContextToNamingContext
-      ty' <- castEff . mapEitherDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName ty) ctx
-      t' <- castEff . mapEitherDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName (PackageTerm t)) ctx
+      ty' <- castEff . mapLeftDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName ty) ctx
+      t' <- castEff . mapLeftDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName (PackageTerm t)) ctx
       throwError $ NotMatchedTypeExistType t' ty'
 typing (UnPackageTerm t) = do
   body <- typing $ t ^. #body
@@ -453,8 +453,8 @@ typing (UnPackageTerm t) = do
     ExistType ty -> indexShift (-2) <$> local (V.cons (t ^. #name, TypedVariableTermBind (ty ^. #body)) . V.cons (t ^. #type, TypedVariableTypeBind)) (typing (t ^. #in))
     ty -> do
       ctx <- asks typingContextToNamingContext
-      ty' <- castEff . mapEitherDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName ty) ctx
-      t' <- castEff . mapEitherDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName (UnPackageTerm t)) ctx
+      ty' <- castEff . mapLeftDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName ty) ctx
+      t' <- castEff . mapLeftDef RestoreNameErrorWhileTypingError $ runReaderDef (restoreName (UnPackageTerm t)) ctx
       throwError $ NotMatchedTypeExistType t' ty'
 
 leaveTyping :: TypingContext -> NamedTerm -> Either Errors NamedType
