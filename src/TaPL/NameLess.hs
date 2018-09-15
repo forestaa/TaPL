@@ -10,10 +10,11 @@ module TaPL.NameLess where
 
 import RIO
 
-import Control.Monad.Error.Class
+-- import Control.Monad.Error.Class
 import Data.Extensible
 import Data.Extensible.Effect.Default
 
+import MapLeftEff
 import SString
 
 type DeBrujinIndex = Int
@@ -27,56 +28,51 @@ type family Not (a :: Bool) where
   Not 'True = 'False
   Not 'False = 'True
 
-type NamingContext = Vector (SString, Binding)
-data Binding = 
-    ConstTermBind
-  | VariableTermBind
-  | ConstTypeBind 
-  | VariableTypeBind 
-  deriving (Show, Eq)
-data NamingContextError a = 
-    MissingVariableInNamingContext (Named a) NamingContext 
-  | MissingTypeVariableInNamingContext (Named a) NamingContext
-deriving instance Eq (Named a) => Eq (NamingContextError a)
-instance Show (Named a) => Show (NamingContextError a) where
-  show (MissingVariableInNamingContext name ctx) = concat ["missing variable in naming context: variable: ", show name, ", NamingContext: ", show ctx]
-  show (MissingTypeVariableInNamingContext name ctx) = concat ["missing type variable in naming context: type variable: ", show name, ", NamingContext: ", show ctx]
-data NameLessErrors =
-    UnNameError UnNameError
-  | RestoreNameError RestoreNameError
+class Binding (f :: Bool -> *) b where
+  binding :: Proxy f -> b
+
+-- instance Binding () NamedBinding
+type Context b = Vector (SString, b)
+
+-- type NamingContext = Vector (SString, Binding)
+-- data NamedBinding = 
+--     ConstTermBind
+--   | VariableTermBind
+--   | ConstTypeBind 
+--   | VariableTypeBind 
+--   deriving (Show, Eq)
+data ContextError a b = 
+    MissingVariableInContext (Named a) (Context b)
+  -- | MissingTypeVariableInNamingContext (Named a) (Context b)
+deriving instance (Eq (Named a), Eq b) => Eq (ContextError a b)
+instance (Show (Named a), Show b) => Show (ContextError a b) where
+  show (MissingVariableInContext name ctx) = concat ["missing variable in context: variable: ", show name, ", Context: ", show ctx]
+  -- show (MissingTypeVariableInNamingContext name ctx) = concat ["missing type variable in naming context: type variable: ", show name, ", Context: ", show ctx]
+data NameLessErrors b =
+    UnNameError (UnNameError b)
+  | RestoreNameError (RestoreNameError b)
   deriving (Eq)
-instance Show NameLessErrors where
+instance Show b => Show (NameLessErrors b) where
   show (UnNameError e) = "UnName Error: " ++ show e
   show (RestoreNameError e) = "RestoreName Error: " ++ show e
 
 
-class FindVar (f :: Bool -> *) (a :: Bool) where
-  findvar :: Proxy f -> NamingContext -> Named a -> Maybe (Named (Not a))
-class FindVar f a => NameLess (f :: Bool -> *) a where
-  nameless :: f a -> Eff [EitherDef (NamingContextError a), ReaderDef NamingContext] (f (Not a))
-type UnNameError = NamingContextError 'True
-unName :: NameLess f 'True => f 'True -> Eff '[EitherDef UnNameError, ReaderDef NamingContext] (f 'False)
+class FindVar (f :: Bool -> *) (a :: Bool) b where
+  findvar :: Proxy f -> Context b -> Named a -> Maybe (Named (Not a))
+class (FindVar f a b, Binding f b) => NameLess (f :: Bool -> *) a b where
+  nameless :: f a -> Eff [EitherDef (ContextError a b), ReaderDef (Context b)] (f (Not a))
+type UnNameError b = ContextError 'True b
+unName :: NameLess f 'True b => f 'True -> Eff '[EitherDef (UnNameError b), ReaderDef (Context b)] (f 'False)
 unName = nameless
-type RestoreNameError = NamingContextError 'False
-restoreName :: NameLess f 'False => f 'False -> Eff '[EitherDef RestoreNameError, ReaderDef NamingContext] (f 'True)
+type RestoreNameError b = ContextError 'False b
+restoreName :: NameLess f 'False b => f 'False -> Eff '[EitherDef (RestoreNameError b), ReaderDef (Context b)] (f 'True)
 restoreName = nameless
 
-leaveUnName :: NameLess f 'True => NamingContext -> f 'True -> Either UnNameError (f 'False)
+leaveUnName :: NameLess f 'True b => Context b -> f 'True -> Either (UnNameError b) (f 'False)
 leaveUnName ctx t = leaveEff . (`runReaderDef` ctx) . runEitherDef $ unName t
-leaveRestoreName :: NameLess f 'False => NamingContext -> f 'False -> Either RestoreNameError (f 'True)
+leaveRestoreName :: NameLess f 'False b => Context b -> f 'False -> Either (RestoreNameError b) (f 'True)
 leaveRestoreName ctx t = leaveEff . (`runReaderDef` ctx) . runEitherDef $ restoreName t
-leaveUnRestoreName :: (NameLess f 'True, NameLess f 'False) => NamingContext -> f 'True -> Either NameLessErrors (f 'True)
+leaveUnRestoreName :: (NameLess f 'True b, NameLess f 'False b) => Context b -> f 'True -> Either (NameLessErrors b) (f 'True)
 leaveUnRestoreName ctx t = leaveEff . (`runReaderDef` ctx) . runEitherDef $ do
-  t' <- mapEitherDef UnNameError $ unName t
-  mapEitherDef RestoreNameError $ restoreName t'
-  where
-    mapEitherDef :: (e -> e') -> Eff '[EitherDef e, ReaderDef r] a -> Eff '[EitherDef e', ReaderDef r] a
-    mapEitherDef f m = do
-      ret <- castEff $ runEitherDef m
-      case ret of
-        Right a -> return a
-        Left e -> throwError $ f e
--- leaveUnRestoreName ctx t = do
---   t' <- mapLeft UnNameError $ leaveUnName ctx t
---   mapLeft RestoreNameError $ leaveRestoreName ctx t'
-
+  t' <- mapLeftDef UnNameError $ unName t
+  mapLeftDef RestoreNameError $ restoreName t'

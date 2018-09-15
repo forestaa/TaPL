@@ -19,32 +19,32 @@ spec = do
     it "λX.X ---> λX.0" $ do
       let ty = AbstractionType (#name @= "X" <: #kind @= StarKind <: #body @= VariableType "X" <: nil)
           expected = AbstractionType (#name @= "X" <: #kind @= StarKind <: #body @= VariableType 0 <: nil)
-      leaveUnName [] ty `shouldBe` Right expected
+      leaveUnName ([] :: TypingContext) ty `shouldBe` Right expected
     it "λX.0 ---> λX.X" $ do
       let ty = AbstractionType (#name @= "X" <: #kind @= StarKind <: #body @= VariableType 0 <: nil)
           expected = AbstractionType (#name @= "X" <: #kind @= StarKind <: #body @= VariableType "X" <: nil)
-      leaveRestoreName [] ty `shouldBe` Right expected
+      leaveRestoreName ([] :: TypingContext) ty `shouldBe` Right expected
     it "λX.∀Y<:X.Y" $ do
       let ty = AbstractionType (#name @= "X" <: #kind @= StarKind <: #body @= UniversalType (#name @= "Y" <: #bound @= VariableType "X" <: #body @= VariableType "Y" <: nil) <: nil)
           expected = AbstractionType (#name @= "X" <: #kind @= StarKind <: #body @= UniversalType (#name @= "Y" <: #bound @= VariableType 0 <: #body @= VariableType 0 <: nil) <: nil)
-      leaveUnName [] ty `shouldBe` Right expected
+      leaveUnName ([] :: TypingContext) ty `shouldBe` Right expected
     it "λX.(λY.X->Y Top) Top" $ do
       let ty = ApplicationType (#function @= AbstractionType (#name @= "X" <: #kind @= StarKind <: #body @= ApplicationType (#function @= AbstractionType (#name @= "Y" <: #kind @= StarKind <: #body @= ArrowType (#domain @= VariableType "X" <: #codomain @= VariableType "Y" <: nil) <: nil) <: #argument @= TopType <: nil) <: nil) <: #argument @= TopType <: nil)
           expected = ApplicationType (#function @= AbstractionType (#name @= "X" <: #kind @= StarKind <: #body @= ApplicationType (#function @= AbstractionType (#name @= "Y" <: #kind @= StarKind <: #body @= ArrowType (#domain @= VariableType 1 <: #codomain @= VariableType 0 <: nil) <: nil) <: #argument @= TopType <: nil) <: nil) <: #argument @= TopType <: nil)
-      leaveUnName [] ty `shouldBe` Right expected
+      leaveUnName ([] :: TypingContext) ty `shouldBe` Right expected
   describe "simplify" $ do
     it "λX.(λY.X->Y Top) Top ---> Top -> Top" $ do
       let ty = ApplicationType (#function @= AbstractionType (#name @= "X" <: #kind @= StarKind <: #body @= ApplicationType (#function @= AbstractionType (#name @= "Y" <: #kind @= StarKind <: #body @= ArrowType (#domain @= VariableType "X" <: #codomain @= VariableType "Y" <: nil) <: nil) <: #argument @= TopType <: nil) <: nil) <: #argument @= TopType <: nil)
           expected = ArrowType (#domain @= TopType <: #codomain @= TopType <: nil)
-      leaveNormalize [] ty `shouldBe` Right expected
+      leaveNormalize ([] :: TypingContext) ty `shouldBe` Right expected
     it "λX.(λY.X->Y Top) --> λX.(λY.X->Y Top)" $ do
       let ty = AbstractionType (#name @= "X" <: #kind @= StarKind <: #body @= ApplicationType (#function @= AbstractionType (#name @= "Y" <: #kind @= StarKind <: #body @= ArrowType (#domain @= VariableType "X" <: #codomain @= VariableType "Y" <: nil) <: nil) <: #argument @= TopType <: nil) <: nil)
           expected = ty
-      leaveNormalize [] ty `shouldBe` Right expected
+      leaveNormalize ([] :: TypingContext) ty `shouldBe` Right expected
   describe "subtype" $ do
     let idType = AbstractionType (#name @= "X" <: #kind @= StarKind <: #body @= VariableType "X" <: nil)
         idType' = AbstractionType (#name @= "X" <: #kind @= StarKind <: #body @= VariableType 0 <: nil)
-        ctx = [("F", TypedVariableTypeBind idType'), ("A", TypedVariableTypeBind (VariableType 0)), ("B", TypedVariableTypeBind TopType)]
+        ctx = [("F", VariableTypeBind idType'), ("A", VariableTypeBind (VariableType 0)), ("B", VariableTypeBind TopType)]
     it "ctx |- A <: Id B" $ do
       let left = VariableType "A"
           right = ApplicationType (#function @= idType <: #argument @= VariableType "B" <: nil)
