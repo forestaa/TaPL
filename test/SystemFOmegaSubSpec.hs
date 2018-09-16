@@ -32,7 +32,7 @@ spec = do
       let ty = ApplicationType (#function @= AbstractionType (#name @= "X" <: #kind @= StarKind <: #body @= ApplicationType (#function @= AbstractionType (#name @= "Y" <: #kind @= StarKind <: #body @= ArrowType (#domain @= VariableType "X" <: #codomain @= VariableType "Y" <: nil) <: nil) <: #argument @= TopType <: nil) <: nil) <: #argument @= TopType <: nil)
           expected = ApplicationType (#function @= AbstractionType (#name @= "X" <: #kind @= StarKind <: #body @= ApplicationType (#function @= AbstractionType (#name @= "Y" <: #kind @= StarKind <: #body @= ArrowType (#domain @= VariableType 1 <: #codomain @= VariableType 0 <: nil) <: nil) <: #argument @= TopType <: nil) <: nil) <: #argument @= TopType <: nil)
       leaveUnName ([] :: TypingContext) ty `shouldBe` Right expected
-  describe "simplify" $ do
+  describe "normalize" $ do
     it "λX.(λY.X->Y Top) Top ---> Top -> Top" $ do
       let ty = ApplicationType (#function @= AbstractionType (#name @= "X" <: #kind @= StarKind <: #body @= ApplicationType (#function @= AbstractionType (#name @= "Y" <: #kind @= StarKind <: #body @= ArrowType (#domain @= VariableType "X" <: #codomain @= VariableType "Y" <: nil) <: nil) <: #argument @= TopType <: nil) <: nil) <: #argument @= TopType <: nil)
           expected = ArrowType (#domain @= TopType <: #codomain @= TopType <: nil)
@@ -89,4 +89,12 @@ spec = do
       let left = topOf $ ArrowKind (#domain @= StarKind <: #codomain @= StarKind <: nil)
           right = topOf $ ArrowKind (#domain @= StarKind <: #codomain @= ArrowKind (#domain @= StarKind <: #codomain @= StarKind <: nil) <: nil)
       leaveIsSubTypeOf ctx left right `shouldBe` Right False
-    
+  describe "typing: chpater 32" $ do
+    let counter = ExistentialType (#name @= "X" <: #bound @= topOf StarKind <: #body @= RecordType [("state", (Covariant, VariableType 0)), ("methods", (Covariant, RecordType [("get", (Covariant, ArrowType (#domain @= VariableType 0 <: #codomain @= NatType <: nil))), ("inc", (Covariant, ArrowType (#domain @= VariableType 0 <: #codomain @= VariableType 0 <: nil)))]))] <: nil)
+        counterR = RecordType [("x", (Covariant, NatType))]
+        ctx = [("Counter", TypeAbbreviationBind counter), ("CounterR", TypeAbbreviationBind counterR)]
+    it "{*CounterR, {state = {x = 5}, methods = {get = λr:CounterR. r.x, inc = λr:CounterR. {x=succ(r.x)}}}} as Counter" $ do
+      let term = RecordTerm [("state", (Covariant, RecordTerm [("x", (Covariant, Zero))])), ("methods", (Covariant, RecordTerm [("get", (Covariant, AbstractionTerm (#name @= "r" <: #type @= VariableType "CounterR" <: #body @= ProjectionTerm (#term @= VariableTerm "r" <: #label @= "x" <: nil) <: nil))), ("inc", (Covariant, AbstractionTerm (#name @= "r" <: #type @= VariableType "CounterR" <: #body @= RecordTerm [("x", (Covariant, Succ (ProjectionTerm (#term @= VariableTerm "r" <: #label @= "x" <: nil))))] <: nil)))]))]
+          c = PackageTerm (#type @= VariableType "CounterR" <: #term @= term <: #exist @= VariableType "Counter" <: nil)
+          expected = VariableType "Counter"
+      leaveTyping ctx c `shouldBe` Right expected

@@ -10,7 +10,6 @@ module TaPL.NameLess where
 
 import RIO
 
--- import Control.Monad.Error.Class
 import Data.Extensible
 import Data.Extensible.Effect.Default
 
@@ -31,23 +30,13 @@ type family Not (a :: Bool) where
 class Binding (f :: Bool -> *) b where
   binding :: Proxy f -> b
 
--- instance Binding () NamedBinding
 type Context b = Vector (SString, b)
 
--- type NamingContext = Vector (SString, Binding)
--- data NamedBinding = 
---     ConstTermBind
---   | VariableTermBind
---   | ConstTypeBind 
---   | VariableTypeBind 
---   deriving (Show, Eq)
 data ContextError a b = 
     MissingVariableInContext (Named a) (Context b)
-  -- | MissingTypeVariableInNamingContext (Named a) (Context b)
 deriving instance (Eq (Named a), Eq b) => Eq (ContextError a b)
 instance (Show (Named a), Show b) => Show (ContextError a b) where
   show (MissingVariableInContext name ctx) = concat ["missing variable in context: variable: ", show name, ", Context: ", show ctx]
-  -- show (MissingTypeVariableInNamingContext name ctx) = concat ["missing type variable in naming context: type variable: ", show name, ", Context: ", show ctx]
 data NameLessErrors b =
     UnNameError (UnNameError b)
   | RestoreNameError (RestoreNameError b)
