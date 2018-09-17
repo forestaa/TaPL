@@ -147,7 +147,7 @@ spec = do
       leaveTyping ctx sendinc' `shouldBe` Right expected
 
     let resetCounterM = AbstractionType (#name @= "R" <: #kind @= StarKind <: #body @= RecordType [("get", (Covariant, ArrowType (#domain @= VariableType 0 <: #codomain @= NatType <: nil))), ("inc", (Covariant, ArrowType (#domain @= VariableType 0 <: #codomain @= VariableType 0 <: nil))), ("reset", (Covariant, ArrowType (#domain @= VariableType 0 <: #codomain @= VariableType 0 <: nil)))] <: nil)
-
+ 
     modify $ V.cons ("ResetCounterM", TypeAbbreviationBind resetCounterM)
     ctx <- get
 
@@ -156,16 +156,37 @@ spec = do
           expected = ApplicationType (#function @= VariableType "Object" <: #argument @= VariableType "ResetCounterM" <: nil)
       leaveTyping ctx t `shouldBe` Right expected
     
-    let counterClass = TypeAbstractionTerm (#name @= "R" <: #bound @= VariableType "CounterR" <: #body @= RecordTerm [("get", (Covariant, AbstractionTerm (#name @= "s" <: #type @= VariableType "R" <: #body @= ProjectionTerm (#term @= VariableTerm "s" <: #label @= "x" <: nil) <: nil))), ("inc", (Covariant, AbstractionTerm (#name @= "s" <: #type @= VariableType "R" <: #body @= UpdateTerm (#record @= VariableTerm "s" <: #label @= "x" <: #new @= Succ (ProjectionTerm (#term @= VariableTerm "s" <: #label @= "x" <: nil)) <: nil) <: nil)))] <: nil)
+    let counterR = RecordType [("x", (Invariant, NatType))]
 
-    -- modify $ V.cons ("CounterClass", TypeAbbreviationBind counterClass)
+    put [("ResetCounterM", TypeAbbreviationBind resetCounterM), ("CounterM", TypeAbbreviationBind counterM), ("Object", TypeAbbreviationBind object), ("ResetCounter", TypeAbbreviationBind resetCounter), ("CounterR", TypeAbbreviationBind counterR), ("Counter", TypeAbbreviationBind counter)]
+    ctx <- get
+
+    let counterClass = TypeAbstractionTerm (#name @= "R" <: #bound @= VariableType "CounterR" <: #body @= AscribeTerm (#term @= RecordTerm [("get", (Covariant, AbstractionTerm (#name @= "s" <: #type @= VariableType "R" <: #body @= ProjectionTerm (#term @= VariableTerm "s" <: #label @= "x" <: nil) <: nil))), ("inc", (Covariant, AbstractionTerm (#name @= "s" <: #type @= VariableType "R" <: #body @= UpdateTerm (#record @= VariableTerm "s" <: #label @= "x" <: #new @= Succ (ProjectionTerm (#term @= VariableTerm "s" <: #label @= "x" <: nil)) <: nil) <: nil)))] <: #as @= ApplicationType (#function @= VariableType "CounterM" <: #argument @= VariableType "R" <: nil) <: nil) <: nil)
 
     lift $ it "CounterClass" $ do
+      let expected = UniversalType (#name @= "R" <: #bound @= VariableType "CounterR" <: #body @= ApplicationType (#function @= VariableType "CounterM" <: #argument @= VariableType "R" <: nil) <: nil)
+      leaveTyping ctx counterClass `shouldBe` Right expected
+      -- leaveTypingAssertion ctx counterClass expected `shouldBe` Right True
+
+    lift $ it "CounterClass instance" $ do
       let t = PackageTerm (#type @= VariableType "CounterR" <: #term @= RecordTerm [("state", (Covariant, RecordTerm [("x", (Invariant, Zero))])), ("methods", (Covariant, TypeApplicationTerm (#term @= counterClass <: #type @= VariableType "CounterR" <: nil)))] <: #exist @= ApplicationType (#function @= VariableType "Object" <: #argument @= VariableType "CounterM" <: nil) <: nil)
           expected = VariableType "Counter"
-      case leaveTyping ctx t of
-        Right ty -> leaveIsEquivalentTo ctx ty expected `shouldBe` Right True
-        _ -> expectationFailure "hogehoge"
+      leaveTypingAssertion ctx t expected `shouldBe` Right True
 
-    -- lift $ it "BackupCounterClass" $ do
-    --   let resetCounterClass = TypeAbstractionTerm (#name @= "R" <: #bound @= VariableType "CounterR" <: #body @=  <: nil)
+    let resetCounterClass = TypeAbstractionTerm (#name @= "R" <: #bound @= VariableType "CounterR" <: #body @= LetTerm (#name @= "super" <: #body @= TypeApplicationTerm (#term @= counterClass <: #type @= VariableType "R" <: nil) <: #in @= AscribeTerm (#term @= RecordTerm [("get", (Covariant, ProjectionTerm (#term @= VariableTerm "super" <: #label @= "get" <: nil))), ("inc", (Covariant, ProjectionTerm (#term @= VariableTerm "super" <: #label @= "inc" <: nil))), ("reset", (Covariant, AbstractionTerm (#name @= "s" <: #type @= VariableType "R" <: #body @= UpdateTerm (#record @= VariableTerm "s" <: #label @= "x" <: #new @= Zero <: nil) <: nil)))] <: #as @= ApplicationType (#function @= VariableType "ResetCounterM" <: #argument @= VariableType "R" <: nil) <: nil) <: nil) <: nil)
+
+    lift $ it "ResetCounterClass" $ do
+      let expected = UniversalType (#name @= "R" <: #bound @= VariableType "CounterR" <: #body @= ApplicationType (#function @= VariableType "ResetCounterM" <: #argument @= VariableType "R" <: nil) <: nil)
+      leaveSubTypingAssertion ctx resetCounterClass expected `shouldBe` Right True
+
+    let backupCounterM = AbstractionType (#name @= "R" <: #kind @= StarKind <: #body @= RecordType [("get", (Covariant, ArrowType (#domain @= VariableType 0 <: #codomain @= NatType <: nil))), ("inc", (Covariant, ArrowType (#domain @= VariableType 0 <: #codomain @= VariableType 0 <: nil))), ("reset", (Covariant, ArrowType (#domain @= VariableType 0 <: #codomain @= VariableType 0 <: nil))), ("backup", (Covariant, ArrowType (#domain @= VariableType 0 <: #codomain @= VariableType 0 <: nil)))] <: nil)
+        backupCounterR = RecordType [("x", (Invariant, NatType)), ("old", (Invariant, NatType))]
+        backupCounterClass = TypeAbstractionTerm (#name @= "R" <: #bound @= VariableType "BackupCounterR" <: #body @= LetTerm (#name @= "super" <: #body @= TypeApplicationTerm (#term @= resetCounterClass <: #type @= VariableType "R" <: nil) <: #in @= AscribeTerm (#term @= RecordTerm [("get", (Covariant, ProjectionTerm (#term @= VariableTerm "super" <: #label @= "get" <: nil))), ("inc", (Covariant, ProjectionTerm (#term @= VariableTerm "super" <: #label @= "inc" <: nil))), ("reset", (Covariant, AbstractionTerm (#name @= "s" <: #type @= VariableType "R" <: #body @= UpdateTerm (#record @= VariableTerm "s" <: #label @= "x" <: #new @= ProjectionTerm (#term @= VariableTerm "s" <: #label @= "old" <: nil) <:nil) <: nil))), ("backup", (Covariant, AbstractionTerm (#name @= "s" <: #type @= VariableType "R" <: #body @= UpdateTerm (#record @= VariableTerm "s" <: #label @= "old" <: #new @= ProjectionTerm (#term @= VariableTerm "s" <: #label @= "x" <: nil) <:nil) <: nil)))] <: #as @= ApplicationType (#function @= VariableType "BackupCounterM" <: #argument @= VariableType "R" <: nil) <: nil) <: nil) <: nil)
+      
+    modify $ V.cons ("BackupCounterM", TypeAbbreviationBind backupCounterM)
+    modify $ V.cons ("BackupCounterR", TypeAbbreviationBind backupCounterR)
+    ctx <- get
+
+    lift $ it "BackupCounterClass" $ do
+      let expected = UniversalType (#name @= "R" <: #bound @= VariableType "BackupCounterR" <: #body @= ApplicationType (#function @= VariableType "BackupCounterM" <: #argument  @= VariableType "R" <: nil) <: nil) :: NamedType
+      leaveTyping ctx backupCounterClass `shouldBe` Right expected
