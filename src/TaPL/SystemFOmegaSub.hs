@@ -26,7 +26,6 @@ import TaPL.NameLess
 
 import SString
 import MapLeftEff
--- import qualified Debug.Trace as D
 
 
 
@@ -445,7 +444,8 @@ kinding (PrimitiveType _) = return StarKind
 kinding (VariableType x) = do
   ctx <- ask
   case snd <$> ctx V.!? x of
-    Just (VariableTypeBind ty) -> kinding ty
+    Just (VariableTypeBind ty) -> kinding $ indexShift (x+1) ty
+    Just (TypeAbbreviationBind ty) -> kinding $ indexShift (x+1) ty
     _ -> throwError . MissingTypeVariableInContextWhileKinding $ MissingVariableInContext x ctx
 kinding (ArrowType ty) = do
   let domain = ty ^. #domain
@@ -511,6 +511,83 @@ kinding (ApplicationType ty) = do
       whole <- restoreNameInKinding $ ApplicationType ty
       throwError $ ArrowKindExpected k f' whole
 
+-- kinding TopType = trace (mconcat ["kinding: ty = ", tshow (TopType :: UnNamedType)]) $ return StarKind
+-- kinding UnitType = trace (mconcat ["kinding: ty = ", tshow (UnitType :: UnNamedType)]) $ return StarKind
+-- kinding NatType = trace (mconcat ["kinding: ty = ", tshow (NatType :: UnNamedType)]) $ return StarKind
+-- -- kinding BoolType = return StarKind
+-- kinding ty@(PrimitiveType _) = trace (mconcat ["kinding: ty = ", tshow ty]) $ return StarKind
+-- kinding (VariableType x) = do
+--   ctx <- (\ctx -> trace (mconcat ["kinding: ty = ", tshow (VariableType x), ", ctx = ", tshow ctx]) ctx) <$> ask
+--   case snd <$> ctx V.!? x of
+--     Just (VariableTypeBind ty) -> kinding $ indexShift (x+1) ty
+--     Just (TypeAbbreviationBind ty) -> kinding $ indexShift (x+1) ty
+--     _ -> throwError . MissingTypeVariableInContextWhileKinding $ MissingVariableInContext x ctx
+-- kinding (ArrowType ty) = do
+--   let domain = ty ^. #domain
+--       codomain = ty ^. #codomain
+--   domainK <- trace (mconcat ["kinding: ty = ", tshow (ArrowType ty)]) $ kinding domain
+--   codomainK <- kinding codomain
+--   if domainK /= StarKind 
+--     then failed domain domainK
+--     else if codomainK /= StarKind
+--       then failed codomain codomainK
+--       else return StarKind
+--   where
+--     failed ty' k = do
+--       ty'' <- restoreNameInKinding ty'
+--       whole <- restoreNameInKinding $ ArrowType ty
+--       throwError $ StarKindExpected k ty'' whole
+-- kinding (RecordType fields) = trace (mconcat ["kinding: ty = ", tshow (RecordType fields)]) $ Map.foldrWithKey kindcheck (return StarKind) fields
+--   where
+--     kindcheck label (v, ty) m = m >> do
+--       k <- kinding ty
+--       if k == StarKind
+--         then return StarKind
+--         else do
+--           ty' <- restoreNameInKinding ty
+--           whole <- restoreNameInKinding $ RecordType fields
+--           throwError $ StarKindExpectedAtLabel k v label ty' whole
+-- kinding (UniversalType ty) = do
+--   let name = ty ^. #name
+--       bound = ty ^. #bound
+--       body = ty ^. #body
+--   bodyK <- trace (mconcat ["kinding: ty = ", tshow (UniversalType ty)]) $ local (V.cons (name, VariableTypeBind bound)) $ kinding body
+--   if bodyK == StarKind
+--     then return StarKind
+--     else do
+--       body' <- local (V.cons (name, VariableTypeBind bound)) $ restoreNameInKinding body
+--       whole <- restoreNameInKinding $ UniversalType ty
+--       throwError $ StarKindExpected bodyK body' whole
+-- kinding (ExistentialType ty) = do
+--   let name = ty ^. #name
+--       bound = ty ^. #bound
+--       body = ty ^. #body
+--   bodyK <- trace (mconcat ["kinding: ty = ", tshow (ExistentialType ty)]) $ local (V.cons (name, VariableTypeBind bound)) $ kinding body
+--   if bodyK == StarKind
+--     then return StarKind
+--     else do
+--       body' <- local (V.cons (name, VariableTypeBind bound)) $ restoreNameInKinding body
+--       whole <- restoreNameInKinding $ ExistentialType ty
+--       throwError $ StarKindExpected bodyK body' whole
+-- kinding (AbstractionType ty) = do
+--   let k = ty ^. #kind
+--       top = topOf k
+--   codomain <- trace (mconcat ["kinding: ty = ", tshow (AbstractionType ty)]) $ local (V.cons (ty ^. #name, VariableTypeBind top)) $ kinding (ty ^. #body)
+--   return . ArrowKind $ #domain @= k <: #codomain @= codomain <: nil
+-- kinding (ApplicationType ty) = do
+--   let f = ty ^. #function
+--   k1 <- trace (mconcat ["kinding: ty = ", tshow (ApplicationType ty)]) $ kinding f
+--   k2 <- kinding $ ty ^. #argument
+--   case k1 of
+--     ArrowKind k | k ^. #domain == k2 -> return $ k ^. #codomain
+--     ArrowKind k -> throwError . ApplicationUnMatchedKind (k ^. #domain) k2 =<< restoreNameInKinding (ApplicationType ty)
+--     k -> do
+--       f' <- restoreNameInKinding f
+--       whole <- restoreNameInKinding $ ApplicationType ty
+--       throwError $ ArrowKindExpected k f' whole
+
+
+
 topOf :: Kind -> Type a
 topOf StarKind = TopType
 topOf (ArrowKind k) = AbstractionType $ #name @= "_" <: #kind @= k ^. #domain <: #body @= topOf (k ^. #codomain) <: nil
@@ -534,7 +611,6 @@ data TypingError =
   | StarKindExpectedWithTerm Kind NamedType NamedTerm
   | KindingError NamedType NamedTerm KindingError
   | PromotingError PromotingError
-  -- | NormalizingError NormalizingError
   | RestoreNameErrorWhileTyping (RestoreNameError TypedBinding)
   deriving (Eq)
 instance Show TypingError where
@@ -701,7 +777,7 @@ typing (PackageTerm t) = do
             bool
               (failed1 bound)
               (do
-                let concrete = betaReduction (t ^. #type) exist
+                let concrete = betaReduction (t ^. #type) (ty' ^. #body)
                 term <- typing $ t ^. #term
                 mapLeftDef PromotingError (term `isSubTypeOf` concrete) >>=
                   bool
@@ -735,6 +811,201 @@ typing (UnPackageTerm t) = do
       whole <- restoreNameInTyping $ UnPackageTerm t
       throwError $ ExistentialTypeExpected actual body' whole
 
+-- typing Unit = do
+--   ctx <- ask
+--   trace (mconcat ["typing: ty = ", tshow (Unit :: UnNamedTerm), ", ctx = ", tshow ctx, "\n"]) $ return UnitType
+-- typing Zero = do
+--   ctx <- ask
+--   trace (mconcat ["typing: ty = ", tshow (Zero :: UnNamedTerm), ", ctx = ", tshow ctx, "\n"]) $ return NatType
+-- typing (Succ t) = do
+--   ctx <- ask
+--   ty <- trace (mconcat ["typing: ty = ", tshow (Succ t), ", ctx = ", tshow ctx, "\n"]) $ typing t
+--   mapLeftDef PromotingError (ty `isSubTypeOf` NatType) >>= 
+--     bool
+--       (failed ty)
+--       (return NatType)
+--   where
+--     failed ty = do
+--       t'     <- restoreNameInTyping t
+--       actual <- restoreNameInTyping ty
+--       throwError $ NatTypeExpected actual t' (Succ t')
+-- typing (ConstTerm s) = do
+--   ctx <- ask
+--   ctx <- trace (mconcat ["typing: ty = ", tshow (ConstTerm s :: UnNamedTerm), ", ctx = ", tshow ctx, "\n"]) $ ask
+--   case snd <$> V.find ((==) s . fst) ctx of
+--     Just (ConstTermBind ty) -> return ty
+--     _ -> throwError $ MissingDeclarationInTypingContext (MissingVariableInContext s ctx)
+-- typing (VariableTerm x) = do
+--   ctx <- ask
+--   ctx <- trace (mconcat ["typing: ty = ", tshow (VariableTerm x), ", ctx = ", tshow ctx, "\n"]) $ ask
+--   case ctx V.!? x of
+--     Just (_, VariableTermBind ty) -> return $ indexShift (x+1) ty
+--     _ -> throwError $ MissingVariableInTypingContext (MissingVariableInContext x ctx)
+-- typing (AbstractionTerm t) = do
+--   let domain = t ^. #type
+--   whole <- restoreNameInTyping $ AbstractionTerm t
+--   domain' <- restoreNameInTyping domain
+--   ctx <- ask
+--   k <- trace (mconcat ["typing: ty = ", tshow (AbstractionTerm t), ", ctx = ", tshow ctx, "\n"]) $ mapLeftDef (KindingError domain' whole) $ kinding domain
+--   if k /= StarKind
+--     then trace (mconcat ["not star: k = ", tshow k]) $ failed k domain
+--     else do
+--       codomain <- trace (mconcat ["star: k = ", tshow k]) $ local (V.cons (t ^. #name, VariableTermBind domain)) $ typing (t ^. #body)
+--       return . ArrowType $ #domain @= domain <: #codomain @= indexShift (-1) codomain <: nil
+--   where
+--     failed k ty = do
+--       ty'   <- restoreNameInTyping ty
+--       whole <- restoreNameInTyping $ AbstractionTerm t
+--       throwError $ StarKindExpectedWithTerm k ty' whole
+-- typing (ApplicationTerm t) = do
+--   ctx <- ask
+--   ty1 <- trace (mconcat ["typing: ty = ", tshow (ApplicationTerm t), ", ctx = ", tshow ctx, "\n"]) $ castEff . expose =<< typing (t ^. #function)
+--   ty2 <- typing $ t ^. #argument
+--   case ty1 of
+--     ArrowType ty1' -> do
+--       let domain = ty1' ^. #domain
+--       mapLeftDef PromotingError (ty2 `isSubTypeOf` domain) >>=
+--         bool 
+--           (failed1 ty2 domain)
+--           (return $ ty1' ^. #codomain)
+--     _ -> failed2 ty1
+--   where
+--     failed1 arg domain = do
+--       t1'    <- restoreNameInTyping $ t ^. #argument
+--       arg'   <- restoreNameInTyping arg
+--       domain'   <- restoreNameInTyping domain
+--       whole <- restoreNameInTyping $ ApplicationTerm t
+--       throwError $ SubTypeExpected t1' arg' domain' whole
+--     failed2 ty1 = do
+--       actual <- restoreNameInTyping ty1
+--       f      <- restoreNameInTyping $ t ^. #function
+--       whole  <- restoreNameInTyping $ ApplicationTerm t
+--       throwError $ ArrowTypeExpected actual f whole
+-- typing (RecordTerm fields) = do
+--   ctx <- ask
+--   trace (mconcat ["typing: ty = ", tshow (RecordTerm fields), ", ctx = ", tshow ctx, "\n"]) $ RecordType <$> mapM (traverse typing) fields
+-- typing (ProjectionTerm t) = do
+--   ctx <- ask
+--   ty <- trace (mconcat ["typing: ty = ", tshow (ProjectionTerm t), ", ctx = ", tshow ctx, "\n"]) $ castEff . expose =<< typing (t ^. #term)
+--   case ty of
+--     RecordType fields -> case fields Map.!? (t ^. #label) of
+--       Just (_, ty') -> return ty'
+--       Nothing -> throwError . MissingRecordLabel (t ^. #label) =<< restoreNameInTyping (ProjectionTerm t)
+--     _ -> do
+--       actual <- restoreNameInTyping ty
+--       term   <- restoreNameInTyping $ t ^. #term
+--       whole  <- restoreNameInTyping $ ProjectionTerm t
+--       trace (mconcat ["typing: Projection: ", tshow (ProjectionTerm t), ", before expose: term = ", tshow (t ^. #term), ", after expose: term = ", tshow ty, ", label = ", tshow (t ^. #label), ", ctx = ", tshow ctx, "\n"]) . throwError $ RecordTypeExpected actual term whole
+-- typing (UpdateTerm t) = do
+--   ctx <- ask
+--   record <- trace (mconcat ["typing: ty = ", tshow (UpdateTerm t), ", ctx = ", tshow ctx, "\n"]) $ castEff . expose =<< typing (t ^. #record)
+--   new <- typing $ t ^. #new
+--   case record of
+--     RecordType fields -> 
+--       case fields Map.!? (t ^. #label) of
+--         Just (v, old) 
+--           | v /= Covariant -> throwError . InvariantExpected (t ^. #label) =<< restoreNameInTyping (UpdateTerm t)
+--           | otherwise ->
+--             mapLeftDef PromotingError (new `isSubTypeOf` old) >>= 
+--             bool
+--               (failed1 new old)
+--               (return record)
+--         _ -> failed2
+--     _ -> failed3 record
+--   where
+--     failed1 new old = do
+--       t1    <- restoreNameInTyping $ t ^. #new
+--       new'  <- restoreNameInTyping new
+--       old'  <- restoreNameInTyping old
+--       whole <- restoreNameInTyping $ UpdateTerm t
+--       throwError $ SubTypeExpected t1 new' old' whole
+--     failed2 = throwError . MissingRecordLabel (t ^. #label) =<< restoreNameInTyping (UpdateTerm t)
+--     failed3 record = do
+--       actual <- restoreNameInTyping record
+--       term   <- restoreNameInTyping $ t ^. #record
+--       whole  <- restoreNameInTyping $ UpdateTerm t
+--       throwError $ RecordTypeExpected actual term whole
+-- typing (TypeAbstractionTerm t) = do
+--   let x = t ^. #name
+--       bound = t ^. #bound
+--   ctx <- ask
+--   body <- trace (mconcat ["typing: ty = ", tshow (TypeAbstractionTerm t), ", ctx = ", tshow ctx, "\n"]) $ local (V.cons (x, VariableTypeBind bound)) $ typing (t ^. #body)
+--   return . UniversalType $ #name @= x <: #bound @= bound <: #body @= body <: nil
+-- typing (TypeApplicationTerm t) = do
+--   let ty = t ^. #type
+--   ctx <- ask
+--   term <- trace (mconcat ["typing: ty = ", tshow (TypeApplicationTerm t), ", ctx = ", tshow ctx, "\n"]) $ castEff . expose =<< typing (t ^. #term)
+--   case term of
+--     UniversalType ty' ->
+--       let bound = ty' ^. #bound in
+--       mapLeftDef PromotingError (ty `isSubTypeOf` bound) >>=
+--       bool
+--         (failed1 ty bound)
+--         (return $ betaReduction ty (ty' ^. #body))
+--     _ -> failed2 term
+--   where
+--     failed1 ty bound = do
+--       ty1 <- restoreNameInTyping ty
+--       ty2 <- restoreNameInTyping bound
+--       whole <- restoreNameInTyping $ TypeApplicationTerm t
+--       throwError $ SubTypeExpectedNoTerm ty1 ty2 whole
+--     failed2 term = do
+--       actual <- restoreNameInTyping term
+--       t' <- restoreNameInTyping $ t ^. #term
+--       whole <- restoreNameInTyping $ TypeApplicationTerm t
+--       throwError $ UniversalTypeExpected actual t' whole
+-- typing (PackageTerm t) = do
+--   let exist = t ^. #exist
+--   whole <- restoreNameInTyping $ PackageTerm  t
+--   exist' <- restoreNameInTyping exist
+--   ctx <- ask
+--   k <- trace (mconcat ["typing: ty = ", tshow (PackageTerm t), ", ctx = ", tshow ctx, "\n"]) $ mapLeftDef (KindingError exist' whole) $ kinding exist
+--   if k /= StarKind
+--     then throwError $ StarKindExpectedWithTerm k exist' whole
+--     else do
+--       ty <- castEff $ normalize exist
+--       case ty of
+--         ExistentialType ty' ->
+--           let bound = ty' ^. #bound in
+--           mapLeftDef PromotingError ((t ^. #type) `isSubTypeOf` bound) >>=
+--             bool
+--               (failed1 bound)
+--               (do
+--                 let concrete = betaReduction (t ^. #type) (ty' ^. #body)
+--                 term <- typing $ t ^. #term
+--                 mapLeftDef PromotingError (term `isSubTypeOf` concrete) >>=
+--                   bool
+--                     (failed2 term concrete)
+--                     (return exist))
+--         ty' -> failed3 ty'
+--   where
+--     failed1 bound = do
+--       ty' <- restoreNameInTyping $ t ^. #type
+--       bound' <- restoreNameInTyping bound
+--       whole <- restoreNameInTyping $ PackageTerm t
+--       throwError $ SubTypeExpectedNoTerm ty' bound' whole
+--     failed2 term concrete = do
+--       t' <- restoreNameInTyping $ t ^. #term
+--       term' <- restoreNameInTyping term
+--       concrete' <- restoreNameInTyping concrete
+--       whole <- restoreNameInTyping $ PackageTerm t
+--       throwError $ SubTypeExpected t' term' concrete' whole
+--     failed3 ty = do
+--       actual <- restoreNameInTyping ty
+--       whole <- restoreNameInTyping $ PackageTerm t
+--       throwError $ ExistentialTypeExpectedAs actual whole
+-- typing (UnPackageTerm t) = do
+--   let body = t ^. #body
+--   ctx <- ask
+--   ty <- trace (mconcat ["typing: ty = ", tshow (UnPackageTerm t), ", ctx = ", tshow ctx, "\n"]) $ castEff . expose =<< typing body
+--   case ty of
+--     ExistentialType ty' -> indexShift (-2) <$> local (V.cons (t ^. #name, VariableTermBind (ty' ^. #body)) . V.cons (t ^. #type, VariableTypeBind (ty' ^. #bound))) (typing (t ^. #in))
+--     _ -> do
+--       actual <- restoreNameInTyping ty
+--       body' <- restoreNameInTyping body
+--       whole <- restoreNameInTyping $ UnPackageTerm t
+--       throwError $ ExistentialTypeExpected actual body' whole
+
 restoreNameInTyping :: NameLess f 'False TypedBinding => f 'False -> Eff '[EitherDef TypingError, ReaderDef TypingContext] (f 'True)
 restoreNameInTyping = mapLeftDef RestoreNameErrorWhileTyping . restoreName
 
@@ -746,7 +1017,9 @@ leaveTyping ctx t = leaveEff . (`runReaderDef` ctx) . runEitherDef $ do
  
 
 expose :: UnNamedType -> Eff '[ReaderDef TypingContext] UnNamedType
-expose ty = fmap (either (const ty) id) . runEitherDef $ promoteVariable =<< castEff (normalize ty)
+expose ty = do
+  ty' <- castEff $ normalize ty
+  runEitherDef (promoteVariable ty') >>= either (const $ return ty') expose
 
 data PromotingError = 
     MissingTypeVariableInNamingContextWhilePromoting DeBrujinIndex TypingContext
@@ -759,47 +1032,63 @@ instance Show PromotingError where
 promoteVariable :: UnNamedType -> Eff '[EitherDef PromotingError, ReaderDef TypingContext] UnNamedType
 promoteVariable (VariableType x) = do
   ctx <- ask
+  -- ctx <- trace "test1" ask
   case snd <$> ctx V.!? x of
     Just (VariableTypeBind ty') -> return $ indexShift (x+1) ty'
     _ -> throwError $ MissingTypeVariableInNamingContextWhilePromoting x ctx
+-- promoteVariable (ApplicationType ty) = trace "test2" $ (\ty' -> ApplicationType $ ty & #function .~ ty') <$> promoteVariable (ty ^. #function)
 promoteVariable (ApplicationType ty) = (\ty' -> ApplicationType $ ty & #function .~ ty') <$> promoteVariable (ty ^. #function)
 promoteVariable _ = throwError UnMatchedPromoting
 
 -- perform betaReduction on the left of type application
--- data NormalizingError = MissingTypeAbbreviation (Named 'False) TypingContext
 normalize :: UnNamedType -> Eff '[ReaderDef TypingContext] UnNamedType
 normalize (VariableType x) = do
   ctx <- ask
+  -- ctx <- trace "test3" ask
+  -- case (trace ("Debug: context = " `Text.append` tshow ctx) ctx) V.!? x of
   case ctx V.!? x of
-    Just (_, TypeAbbreviationBind ty) -> normalize ty
+    -- Just (_, TypeAbbreviationBind ty) -> trace ("Debug: type abbreviation = " `Text.append` tshow ty) $ normalize ty
+    Just (_, TypeAbbreviationBind ty) -> normalize $ indexShift (x+1) ty
     _ -> return $ VariableType x
 normalize (ApplicationType ty) = do
+  -- f <- normalize . trace "test4" $ ty ^. #function
   f <- normalize $ ty ^. #function
   case f of
+    -- AbstractionType ty' -> trace (mconcat ["NORMALIZE: ty = ", tshow (AbstractionType ty')]) . normalize $ betaReduction (ty ^. #argument) (ty' ^. #body)
     AbstractionType ty' -> normalize $ betaReduction (ty ^. #argument) (ty' ^. #body)
     _ -> return . ApplicationType $ ty & #function .~ f
 normalize ty = return ty
+-- normalize ty = do
+--   ctx <- ask
+--   trace (mconcat ["test5: ty = ", tshow ty, ", ctx = ", tshow ctx]) $ return ty
 leaveNormalize :: TypingContext -> NamedType -> Either (NameLessErrors TypedBinding) NamedType
 leaveNormalize ctx ty = leaveEff . (`runReaderDef` ctx) . runEitherDef $ mapLeftDef UnNameError (unName ty) >>= castEff . normalize >>=  mapLeftDef RestoreNameError . restoreName 
 
 isSubTypeOf :: UnNamedType -> UnNamedType -> Eff '[EitherDef PromotingError, ReaderDef TypingContext] Bool
 isSubTypeOf ty1 ty2 =
   castEff (ty1 `isEquivalentTo` ty2) >>=
+  -- (trace (mconcat ["Debug: subtyping start ty1 = ", tshow ty1, ", ty2 = ", tshow ty2]) $ castEff (ty1 `isEquivalentTo` ty2)) >>=
     flip bool
+      -- (trace "subtyping success!" $ return True)
       (return True)
       (do
         ty1' <- castEff $ normalize ty1
         ty2' <- castEff $ normalize ty2
         case (ty1', ty2') of
           (_, TopType) -> return True
+          -- (VariableType _, _) -> trace (Text.concat ["Debug: subtyping variable: ty1 = ", tshow ty1, ", ty2 = ", tshow ty2]) $ promoteVariable ty1' >>= (`isSubTypeOf` ty2')
           (VariableType _, _) -> promoteVariable ty1' >>= (`isSubTypeOf` ty2')
           (ArrowType ty1'', ArrowType ty2'') -> (&&) <$> ((ty1'' ^. #domain) `isSubTypeOf` (ty2'' ^. #domain)) <*> ((ty1'' ^. #codomain) `isSubTypeOf` (ty2'' ^. #codomain))
           (RecordType fields1, RecordType fields2) -> Map.foldrWithKey isSubTypeFieldOf (return True) fields2
             where
-              isSubTypeFieldOf label (v2, ty2'') mb = 
+              isSubTypeFieldOf label (v2, ty2'') mb = (&&) <$> mb <*> 
+                -- case (\x -> trace (Text.concat [tshow label, " in ", tshow fields1, " ", tshow x]) x) (fields1 Map.!? label) of
                 case fields1 Map.!? label of
-                  Just (v1, ty1'') | v1 == Invariant || v2 == Covariant -> 
-                    (&&) <$> mb <*> (ty1'' `isSubTypeOf` ty2'')
+                  -- Just (v1, ty1'') | v1 == Invariant || v2 == Covariant -> 
+                  --   (&&) <$> mb <*> (ty1'' `isSubTypeOf` ty2'')
+                  Just (v1, ty1'') | v1 == Invariant || v2 == Covariant -> ty1'' `isSubTypeOf` ty2''
+                  -- Just (v1, ty1'') -> trace (Text.concat ["subtyping failed!! v1 == ", tshow v1, ", ty1'' = ", tshow ty1'', ", v2 = ", tshow v2, ", ty2'' = ", tshow ty2'']) $ return False
+                  -- _ -> trace (Text.concat ["subtyping failed! ty1 = ", tshow ty1', ", ty2 = ", tshow ty2', ", label = ", tshow label, ", fields = ", tshow fields1]) $ return False
                   _ -> return False
           (UniversalType ty1'', UniversalType ty2'') -> do
             let bound1 = ty1'' ^. #bound
@@ -816,14 +1105,19 @@ isSubTypeOf ty1 ty2 =
           (AbstractionType ty1'', AbstractionType ty2'') -> do
             let k = ty1'' ^. #kind
             b <- local (V.cons (mconcat [ty1'' ^. #name, "_", ty2'' ^. #name], VariableTypeBind (topOf k))) $ (ty1'' ^. #body) `isSubTypeOf` (ty2'' ^. #body)
+            -- trace (Text.concat ["subtyping failed! ty1 = ", tshow ty1', ", ty2 = ", tshow ty2]) $ return $ (k == ty2'' ^. #kind) && b
             return $ (k == ty2'' ^. #kind) && b
           (ApplicationType _, _) -> promoteVariable ty1' >>= (`isSubTypeOf` ty2')
+          -- _ -> trace (Text.concat ["subtyping failed! ty1 = ", tshow ty1, ", ty2 = ", tshow ty2]) $ return False)
           _ -> return False)
 
 isEquivalentTo :: UnNamedType -> UnNamedType -> Eff '[ReaderDef TypingContext] Bool
 isEquivalentTo ty1 ty2 = do
   ty1' <- castEff $ normalize ty1
   ty2' <- castEff $ normalize ty2
+  -- ctx <- ask
+  -- ty1' <- trace (mconcat ["Debug: Equivalent: ty1 = ", tshow ty1, ", ty2 = ", tshow ty2, ", ctx = ", tshow ctx]) $ castEff $ normalize ty1
+  -- ty2' <- castEff $ normalize ty2
   case (ty1', ty2') of
     (TopType, TopType) -> return True
     (UnitType, UnitType) -> return True
@@ -832,9 +1126,9 @@ isEquivalentTo ty1 ty2 = do
     (VariableType x, VariableType y) -> return $ x == y
     (ArrowType ty1'', ArrowType ty2'') -> (&&) <$> ((ty1'' ^. #domain) `isEquivalentTo` (ty2'' ^. #domain)) <*> ((ty1'' ^. #codomain) `isEquivalentTo` (ty2'' ^. #codomain))
     (RecordType fields1, RecordType fields2) -> zipFold (Map.toList fields1) (Map.toList fields2)
-    (UniversalType ty1'', UniversalType ty2'') -> (&&) <$> ((ty1'' ^. #bound) `isEquivalentTo` (ty2'' ^. #bound)) <*> ((ty1'' ^. #body) `isEquivalentTo` (ty2'' ^. #body))
-    (ExistentialType ty1'', ExistentialType ty2'') -> (&&) <$> ((ty1'' ^. #bound) `isEquivalentTo` (ty2'' ^. #bound)) <*> ((ty1'' ^. #body) `isEquivalentTo` (ty2'' ^. #body))
-    (AbstractionType ty1'', AbstractionType ty2'') -> (&&) (ty1'' ^. #kind == ty2'' ^. #kind) <$> ((ty1'' ^. #body) `isEquivalentTo` (ty2'' ^. #body))
+    (UniversalType ty1'', UniversalType ty2'') -> local (V.cons (ty1'' ^. #name, VariableTypeBind $ ty1'' ^. #bound)) $ (&&) <$> ((ty1'' ^. #bound) `isEquivalentTo` (ty2'' ^. #bound)) <*> ((ty1'' ^. #body) `isEquivalentTo` (ty2'' ^. #body))
+    (ExistentialType ty1'', ExistentialType ty2'') -> local (V.cons (ty1'' ^. #name, VariableTypeBind $ ty1'' ^. #bound)) $ (&&) <$> ((ty1'' ^. #bound) `isEquivalentTo` (ty2'' ^. #bound)) <*> ((ty1'' ^. #body) `isEquivalentTo` (ty2'' ^. #body))
+    (AbstractionType ty1'', AbstractionType ty2'') -> (&&) (ty1'' ^. #kind == ty2'' ^. #kind) <$> local (V.cons (ty1'' ^. #name, VariableTypeBind $ topOf (ty1'' ^. #kind))) ((ty1'' ^. #body) `isEquivalentTo` (ty2'' ^. #body))
     (ApplicationType ty1'', ApplicationType ty2'') -> (&&) <$> ((ty1'' ^. #function) `isEquivalentTo` (ty2'' ^. #function)) <*> ((ty1'' ^. #argument) `isEquivalentTo` (ty2'' ^. #argument))
     _ -> return False
   where
@@ -847,3 +1141,9 @@ leaveIsSubTypeOf ctx ty1 ty2 = leaveEff . (`runReaderDef` ctx) . runEitherDef $ 
   ty1' <- mapLeftDef (NameLessError . UnNameError) $ unName ty1
   ty2' <- mapLeftDef (NameLessError . UnNameError) $ unName ty2
   mapLeftDef (TypingError . PromotingError) $ ty1' `isSubTypeOf` ty2'
+
+leaveIsEquivalentTo :: TypingContext -> NamedType -> NamedType -> Either Errors Bool
+leaveIsEquivalentTo ctx ty1 ty2 = leaveEff . (`runReaderDef` ctx) . runEitherDef $ do
+  ty1' <- mapLeftDef (NameLessError . UnNameError) $ unName ty1
+  ty2' <- mapLeftDef (NameLessError . UnNameError) $ unName ty2
+  castEff $ ty1' `isEquivalentTo` ty2'

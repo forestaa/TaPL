@@ -9,7 +9,9 @@ import TaPL.NameLess
 import SString
 
 import RIO
+import qualified RIO.Vector as V
 
+import Control.Monad.State.Strict
 import Data.Extensible
 
 
@@ -89,12 +91,81 @@ spec = do
       let left = topOf $ ArrowKind (#domain @= StarKind <: #codomain @= StarKind <: nil)
           right = topOf $ ArrowKind (#domain @= StarKind <: #codomain @= ArrowKind (#domain @= StarKind <: #codomain @= StarKind <: nil) <: nil)
       leaveIsSubTypeOf ctx left right `shouldBe` Right False
-  describe "typing: chpater 32" $ do
+  describe "typing: chpater 32" . (`evalStateT` []) $ do
     let counter = ExistentialType (#name @= "X" <: #bound @= topOf StarKind <: #body @= RecordType [("state", (Covariant, VariableType 0)), ("methods", (Covariant, RecordType [("get", (Covariant, ArrowType (#domain @= VariableType 0 <: #codomain @= NatType <: nil))), ("inc", (Covariant, ArrowType (#domain @= VariableType 0 <: #codomain @= VariableType 0 <: nil)))]))] <: nil)
         counterR = RecordType [("x", (Covariant, NatType))]
-        ctx = [("Counter", TypeAbbreviationBind counter), ("CounterR", TypeAbbreviationBind counterR)]
-    it "{*CounterR, {state = {x = 5}, methods = {get = λr:CounterR. r.x, inc = λr:CounterR. {x=succ(r.x)}}}} as Counter" $ do
-      let term = RecordTerm [("state", (Covariant, RecordTerm [("x", (Covariant, Zero))])), ("methods", (Covariant, RecordTerm [("get", (Covariant, AbstractionTerm (#name @= "r" <: #type @= VariableType "CounterR" <: #body @= ProjectionTerm (#term @= VariableTerm "r" <: #label @= "x" <: nil) <: nil))), ("inc", (Covariant, AbstractionTerm (#name @= "r" <: #type @= VariableType "CounterR" <: #body @= RecordTerm [("x", (Covariant, Succ (ProjectionTerm (#term @= VariableTerm "r" <: #label @= "x" <: nil))))] <: nil)))]))]
-          c = PackageTerm (#type @= VariableType "CounterR" <: #term @= term <: #exist @= VariableType "Counter" <: nil)
-          expected = VariableType "Counter"
+
+    modify $ V.cons ("Counter", TypeAbbreviationBind counter)
+    modify $ V.cons ("CounterR", TypeAbbreviationBind counterR)
+    ctx <- get
+
+    let c = PackageTerm (#type @= VariableType "CounterR" <: #term @= RecordTerm [("state", (Covariant, RecordTerm [("x", (Covariant, Zero))])), ("methods", (Covariant, RecordTerm [("get", (Covariant, AbstractionTerm (#name @= "r" <: #type @= VariableType "CounterR" <: #body @= ProjectionTerm (#term @= VariableTerm "r" <: #label @= "x" <: nil) <: nil))), ("inc", (Covariant, AbstractionTerm (#name @= "r" <: #type @= VariableType "CounterR" <: #body @= RecordTerm [("x", (Covariant, Succ (ProjectionTerm (#term @= VariableTerm "r" <: #label @= "x" <: nil))))] <: nil)))]))] <: #exist @= VariableType "Counter" <: nil)
+
+    lift $ it "{*CounterR, {state = {x = 0}, methods = {get = λr:CounterR. r.x, inc = λr:CounterR. {x=succ(r.x)}}}} as Counter" $ do
+      let expected = VariableType "Counter"
       leaveTyping ctx c `shouldBe` Right expected
+
+    lift $ it "sendget = λc:Counter. let {X, body} = c in body.methods.get(body.state) : Counter -> Nat" $ do
+      let sendget = AbstractionTerm (#name @= "c" <: #type @= VariableType "Counter" <: #body @= UnPackageTerm (#type @= "X" <: #name @= "body" <: #body @= VariableTerm "c" <: #in @= ApplicationTerm (#function @= ProjectionTerm (#term @= ProjectionTerm (#term @= VariableTerm "body" <: #label @= "methods" <: nil) <: #label @= "get" <: nil) <: #argument @= ProjectionTerm (#term @= VariableTerm "body" <: #label @= "state" <: nil) <: nil) <: nil) <: nil)
+          expected = ArrowType (#domain @= VariableType "Counter" <: #codomain @= NatType <: nil)
+      leaveTyping ctx sendget `shouldBe` Right expected
+      let t = ApplicationTerm (#function @= sendget <: #argument @= c <: nil)
+          expected = NatType
+      leaveTyping ctx t `shouldBe` Right expected
+
+    let sendinc = AbstractionTerm (#name @= "c" <: #type @= VariableType "Counter" <: #body @= UnPackageTerm (#type @= "X" <: #name @= "body" <: #body @= VariableTerm "c" <: #in @= PackageTerm (#type @= VariableType "X" <: #term @= RecordTerm [("state", (Covariant, ApplicationTerm (#function @= ProjectionTerm (#term @= ProjectionTerm (#term @= VariableTerm "body" <: #label @= "methods" <: nil) <: #label @= "inc" <: nil) <: #argument @= ProjectionTerm (#term @= VariableTerm "body" <: #label @= "state" <: nil) <: nil))), ("methods", (Covariant, ProjectionTerm (#term @= VariableTerm "body" <: #label @= "methods" <: nil)))] <: #exist @= VariableType "Counter" <: nil) <: nil) <: nil)
+
+    lift $ it "sendinc = λc:Counter. let {X, body} = c in {*X, {state = body.methods.inc(body.state), methods = body.methods}} as Counter : Counter -> Counter" $ do
+      let expected = ArrowType (#domain @= VariableType "Counter" <: #codomain @= VariableType "Counter" <: nil)
+      leaveTyping ctx sendinc `shouldBe` Right expected
+
+    let resetCounter = ExistentialType (#name @= "X" <: #bound @= topOf StarKind <: #body @= RecordType [("state", (Covariant, VariableType 0)), ("methods", (Covariant, RecordType [("get", (Covariant, ArrowType (#domain @= VariableType 0 <: #codomain @= NatType <: nil))), ("inc", (Covariant, ArrowType (#domain @= VariableType 0 <: #codomain @= VariableType 0 <: nil))), ("reset", (Covariant, ArrowType (#domain @= VariableType 0 <: #codomain @= VariableType 0 <: nil)))]))] <: nil)
+
+    modify $ V.cons ("ResetCounter", TypeAbbreviationBind resetCounter)
+    ctx <- get
+
+    let rc = PackageTerm (#type @= VariableType "CounterR" <: #term @= RecordTerm [("state", (Covariant, RecordTerm [("x", (Covariant, Zero))])), ("methods", (Covariant, RecordTerm [("get", (Covariant, AbstractionTerm (#name @= "r" <: #type @= VariableType "CounterR" <: #body @= ProjectionTerm (#term @= VariableTerm "r" <: #label @= "x" <: nil) <: nil))), ("inc", (Covariant, AbstractionTerm (#name @= "r" <: #type @= VariableType "CounterR" <: #body @= RecordTerm [("x", (Covariant, Succ (ProjectionTerm (#term @= VariableTerm "r" <: #label @= "x" <: nil))))] <: nil))), ("reset", (Covariant, AbstractionTerm (#name @= "r" <: #type @= VariableType "CounterR" <: #body @= RecordTerm [("x", (Covariant, Zero))] <: nil)))]))] <: #exist @= VariableType "ResetCounter" <: nil)
+
+    lift $ it "reset counter rc = {*CounterR, {state = {x = 0}, methods = {get = λr:CounterR. r.x, inc = λr:CounterR. {x=succ(r.x)}, reset = λr:CounterR. {x=0}}}} as ResetCounter" $ do
+      let expected1 = VariableType "ResetCounter"
+      leaveTyping ctx rc `shouldBe` Right expected1
+      let t = ApplicationTerm (#function @= sendinc <: #argument @= rc <: nil)
+          expected2 = VariableType "Counter"
+      leaveTyping ctx t `shouldBe` Right expected2
+
+    let object = AbstractionType (#name @= "M" <: #kind @= ArrowKind (#domain @= StarKind <: #codomain @= StarKind <: nil) <: #body @= ExistentialType (#name @= "X" <: #bound @= TopType <: #body @= RecordType [("state", (Covariant, VariableType 0)), ("methods", (Covariant, ApplicationType (#function @= VariableType 1 <: #argument @= VariableType 0 <: nil)))] <: nil) <: nil)
+        counterM = AbstractionType (#name @= "R" <: #kind @= StarKind <: #body @= RecordType [("get", (Covariant, ArrowType (#domain @= VariableType 0 <: #codomain @= NatType <: nil))), ("inc", (Covariant, ArrowType (#domain @= VariableType 0 <: #codomain @= VariableType 0 <: nil)))] <: nil)
+        
+    modify $ V.cons ("Object", TypeAbbreviationBind object)
+    modify $ V.cons ("CounterM", TypeAbbreviationBind counterM) 
+    ctx <- get
+
+    let sendinc' = TypeAbstractionTerm (#name @= "M" <: #bound @= VariableType "CounterM" <: #body @= AbstractionTerm (#name @= "c" <: #type @= ApplicationType (#function @= VariableType "Object" <: #argument @= VariableType "M" <: nil) <: #body @= UnPackageTerm (#type @= "X" <: #name @= "b" <: #body @= VariableTerm "c" <: #in @= PackageTerm (#type @= VariableType "X" <: #term @= RecordTerm [("state", (Covariant, ApplicationTerm (#function @= ProjectionTerm (#term @= ProjectionTerm (#term @= VariableTerm "b" <: #label @= "methods" <: nil) <: #label @= "inc" <: nil) <: #argument @= ProjectionTerm (#term @= VariableTerm "b" <: #label @= "state" <: nil) <: nil))), ("methods", (Covariant, ProjectionTerm (#term @= VariableTerm "b" <: #label @= "methods" <: nil)))] <: #exist @= ApplicationType (#function @= VariableType "Object" <: #argument @= VariableType "M" <: nil) <: nil) <: nil) <: nil) <: nil)
+
+    lift $ it "sendinc: ∀M<:CounterM. Object M -> Object M" $ do
+      let expected = UniversalType (#name @= "M" <: #bound @= VariableType "CounterM" <: #body @= ArrowType (#domain @= ApplicationType (#function @= VariableType "Object" <: #argument @= VariableType "M" <: nil) <: #codomain @= ApplicationType (#function @= VariableType "Object" <: #argument @= VariableType "M" <: nil) <: nil) <: nil)
+      leaveTyping ctx sendinc' `shouldBe` Right expected
+
+    let resetCounterM = AbstractionType (#name @= "R" <: #kind @= StarKind <: #body @= RecordType [("get", (Covariant, ArrowType (#domain @= VariableType 0 <: #codomain @= NatType <: nil))), ("inc", (Covariant, ArrowType (#domain @= VariableType 0 <: #codomain @= VariableType 0 <: nil))), ("reset", (Covariant, ArrowType (#domain @= VariableType 0 <: #codomain @= VariableType 0 <: nil)))] <: nil)
+
+    modify $ V.cons ("ResetCounterM", TypeAbbreviationBind resetCounterM)
+    ctx <- get
+
+    lift $ it "sendinc [ResetConterM] rc" $ do
+      let t = ApplicationTerm (#function @= TypeApplicationTerm (#term @= sendinc' <: #type @= VariableType "ResetCounterM" <: nil) <: #argument @= rc <: nil)
+          expected = ApplicationType (#function @= VariableType "Object" <: #argument @= VariableType "ResetCounterM" <: nil)
+      leaveTyping ctx t `shouldBe` Right expected
+    
+    let counterClass = TypeAbstractionTerm (#name @= "R" <: #bound @= VariableType "CounterR" <: #body @= RecordTerm [("get", (Covariant, AbstractionTerm (#name @= "s" <: #type @= VariableType "R" <: #body @= ProjectionTerm (#term @= VariableTerm "s" <: #label @= "x" <: nil) <: nil))), ("inc", (Covariant, AbstractionTerm (#name @= "s" <: #type @= VariableType "R" <: #body @= UpdateTerm (#record @= VariableTerm "s" <: #label @= "x" <: #new @= Succ (ProjectionTerm (#term @= VariableTerm "s" <: #label @= "x" <: nil)) <: nil) <: nil)))] <: nil)
+
+    -- modify $ V.cons ("CounterClass", TypeAbbreviationBind counterClass)
+
+    lift $ it "CounterClass" $ do
+      let t = PackageTerm (#type @= VariableType "CounterR" <: #term @= RecordTerm [("state", (Covariant, RecordTerm [("x", (Invariant, Zero))])), ("methods", (Covariant, TypeApplicationTerm (#term @= counterClass <: #type @= VariableType "CounterR" <: nil)))] <: #exist @= ApplicationType (#function @= VariableType "Object" <: #argument @= VariableType "CounterM" <: nil) <: nil)
+          expected = VariableType "Counter"
+      case leaveTyping ctx t of
+        Right ty -> leaveIsEquivalentTo ctx ty expected `shouldBe` Right True
+        _ -> expectationFailure "hogehoge"
+
+    -- lift $ it "BackupCounterClass" $ do
+    --   let resetCounterClass = TypeAbstractionTerm (#name @= "R" <: #bound @= VariableType "CounterR" <: #body @=  <: nil)
