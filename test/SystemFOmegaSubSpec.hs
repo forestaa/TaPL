@@ -190,3 +190,15 @@ spec = do
     lift $ it "BackupCounterClass" $ do
       let expected = UniversalType (#name @= "R" <: #bound @= VariableType "BackupCounterR" <: #body @= ApplicationType (#function @= VariableType "BackupCounterM" <: #argument  @= VariableType "R" <: nil) <: nil) :: NamedType
       leaveTyping ctx backupCounterClass `shouldBe` Right expected
+    
+  describe "Type Class" . (`evalStateT` []) $ do
+    let functor = ExistentialType (#name @= "F" <: #bound @= topOf (ArrowKind (#domain @= StarKind <: #codomain @= StarKind <: nil)) <: #body @= RecordType [("fmap", (Covariant, UniversalType (#name @= "X" <: #bound @= TopType <: #body @= UniversalType (#name @= "Y" <: #bound @= TopType <: #body @= ArrowType (#domain @= ArrowType (#domain @= VariableType 1 <: #codomain @= VariableType 0 <: nil) <: #codomain @= ArrowType (#domain @= ApplicationType (#function @= VariableType 2 <: #argument @= VariableType 1 <: nil) <: #codomain @= ApplicationType (#function @= VariableType 2 <: #argument @= VariableType 0 <: nil) <: nil) <: nil) <: nil) <: nil)))] <: nil)
+
+    modify $ V.cons ("Functor", TypeAbbreviationBind functor)
+    ctx <- get
+
+    lift $ it "Nat -> a: Functor" $ do
+      let arrow = AbstractionType (#name @= "X" <: #kind @= StarKind <: #body @= ArrowType (#domain @= NatType <: #codomain @= VariableType "X" <: nil) <: nil)
+          fmap = PackageTerm (#type @= arrow <: #term @= RecordTerm [("fmap", (Covariant, TypeAbstractionTerm (#name @= "X" <: #bound @= TopType <: #body @= TypeAbstractionTerm (#name @= "Y" <: #bound @= TopType <: #body @= AbstractionTerm (#name @= "f" <: #type @= ArrowType (#domain @= VariableType "X" <: #codomain @= VariableType "Y" <: nil) <: #body @= AbstractionTerm (#name @= "g" <: #type @= ArrowType (#domain @= NatType <: #codomain @= VariableType "X" <: nil) <: #body @= AbstractionTerm (#name @= "x" <: #type @= NatType <: #body @= ApplicationTerm (#function @= VariableTerm "f" <: #argument @= ApplicationTerm (#function @= VariableTerm "g" <: #argument @= VariableTerm "x" <: nil) <: nil) <: nil) <: nil) <: nil) <: nil) <: nil)))] <: #exist @= VariableType "Functor" <: nil)
+          expected = VariableType "Functor"
+      leaveTyping ctx fmap `shouldBe` Right expected
