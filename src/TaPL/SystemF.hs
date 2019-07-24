@@ -11,7 +11,7 @@
 module TaPL.SystemF where
 
 
-import RIO  
+import RIO
 import qualified RIO.Map as Map
 import qualified RIO.Vector as V
 
@@ -26,20 +26,20 @@ import SString
 
 type DeBrujinIndex = Int
 type NamingContext = Vector (SString, Binding)
-data Binding = 
+data Binding =
     ConstTermBind
   | VariableTermBind
-  | ConstTypeBind 
-  | VariableTypeBind 
+  | ConstTypeBind
+  | VariableTypeBind
   deriving (Show, Eq)
-data NamingContextError a = 
-    MissingVariableInNamingContext (Named a) NamingContext 
+data NamingContextError a =
+    MissingVariableInNamingContext (Named a) NamingContext
   | MissingTypeVariableInNamingContext (Named a) NamingContext
 deriving instance Eq (Named a) => Eq (NamingContextError a)
 instance Show (Named a) => Show (NamingContextError a) where
   show (MissingVariableInNamingContext name ctx) = concat ["missing variable in naming context: variable: ", show name, ", NamingContext: ", show ctx]
   show (MissingTypeVariableInNamingContext name ctx) = concat ["missing type variable in naming context: type variable: ", show name, ", NamingContext: ", show ctx]
-data Errors = 
+data Errors =
     UnNameError UnNameError
   | TypingError TypingError
   | RestoreNameError RestoreNameError
@@ -107,7 +107,7 @@ leaveBetaReduction ctx s t = do
 
 
 
-data Type a = 
+data Type a =
     PrimitiveType SString
   | NatType
   | VariableType (Named a)
@@ -159,10 +159,10 @@ instance IndexOperation Type where
     codomain <- indexMap c $ ty ^. #codomain
     return . ArrowType $ ty & #domain .~ domain & #codomain .~ codomain
   indexMap c (RecordType ty) = RecordType <$> mapM (indexMap c) ty
-  indexMap c (AllType ty)   = do 
+  indexMap c (AllType ty)   = do
     body <- indexMap (c+1) $ ty ^. #body
     return . AllType $ ty & #body .~ body
-  indexMap c (ExistType ty)   = do 
+  indexMap c (ExistType ty)   = do
     body <- indexMap (c+1) $ ty ^. #body
     return . ExistType $ ty & #body .~ body
 instance IndexShift Type where
@@ -351,17 +351,17 @@ typingContextToNamingContext = fmap (& _2 %~ f)
     f (TypedVariableTermBind _) = VariableTermBind
     f TypedConstTypeBind = ConstTypeBind
     f TypedVariableTypeBind = VariableTypeBind
-data TypedBinding = 
-    TypedConstTermBind UnNamedType 
-  | TypedVariableTermBind UnNamedType 
-  | TypedConstTypeBind 
-  | TypedVariableTypeBind 
+data TypedBinding =
+    TypedConstTermBind UnNamedType
+  | TypedVariableTermBind UnNamedType
+  | TypedConstTypeBind
+  | TypedVariableTypeBind
   deriving (Show, Eq)
-data TypingError = 
+data TypingError =
     MissingDeclarationInNamingContext SString TypingContext
   | MissingVariableTypeInNamingContext DeBrujinIndex TypingContext
   | NotMatchedTypeNatType NamedTerm NamedType
-  | NotMatchedTypeArrowType NamedTerm NamedType NamedTerm NamedType 
+  | NotMatchedTypeArrowType NamedTerm NamedType NamedTerm NamedType
   -- | NotMatchedTypeArrowType
   | NotMatchedTypeProjectionNotRecord
   | NotMatchedTypeProjectionLabelMissing

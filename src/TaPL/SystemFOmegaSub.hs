@@ -28,7 +28,7 @@ import SString
 import MapLeftEff
 
 
-data Errors = 
+data Errors =
     NameLessError (NameLessErrors TypedBinding)
   | TypingError TypingError
   deriving (Eq)
@@ -56,8 +56,8 @@ leaveBetaReduction ctx s t = leaveEff . (`runReaderDef` ctx) . runEitherDef $ do
 
 
 
-data Kind = 
-    StarKind 
+data Kind =
+    StarKind
   | ArrowKind (Record '["domain" :> Kind, "codomain" :> Kind])
   deriving (Eq)
 instance Show Kind where
@@ -75,7 +75,7 @@ data Type a =
   | NatType
   -- | BoolType
   | PrimitiveType SString
-  | VariableType (Named a) 
+  | VariableType (Named a)
   | ArrowType (Record '["domain" :> Type a, "codomain" :> Type a])
   | RecordType (Map.Map SString (Variance, Type a))
   | UniversalType (Record '["name" :> SString, "bound" :> Type a , "body" :> Type a])
@@ -99,9 +99,9 @@ instance (Show (Named a), Show (Type a)) => Show (Type a) where
 type NamedType = Type 'True
 type UnNamedType = Type 'False
 
-data TypedBinding = 
+data TypedBinding =
     ConstTermBind UnNamedType
-  | VariableTermBind UnNamedType 
+  | VariableTermBind UnNamedType
   | VariableTypeBind UnNamedType
   | TypeAbbreviationBind UnNamedType
   deriving (Show, Eq)
@@ -164,11 +164,11 @@ instance IndexOperation Type where
     codomain <- indexMap c $ ty ^. #codomain
     return . ArrowType $ ty & #domain .~ domain & #codomain .~ codomain
   indexMap c (RecordType ty) = RecordType <$> mapM (traverse (indexMap c)) ty
-  indexMap c (UniversalType ty) = do 
+  indexMap c (UniversalType ty) = do
     bound <- indexMap c $ ty ^. #bound
     body <- indexMap (c+1) $ ty ^. #body
     return . UniversalType $ ty & #bound .~ bound & #body .~ body
-  indexMap c (ExistentialType ty) = do 
+  indexMap c (ExistentialType ty) = do
     bound <- indexMap c $ ty ^. #bound
     body <- indexMap (c+1) $ ty ^. #body
     return . ExistentialType $ ty & #bound .~ bound & #body .~ body
@@ -189,7 +189,7 @@ instance Substitution Type Type where
     where
       onvar n var | var == n = indexShift n s
                   | otherwise = VariableType var
-                
+
 
 data Term a =
     Unit
@@ -392,7 +392,7 @@ isVal _ = False
 
 eval1 :: UnNamedTerm -> Maybe UnNamedTerm
 eval1 (Succ t) = Succ <$> eval1 t
--- eval1 (IF t) 
+-- eval1 (IF t)
 --   | t ^. #cond == TRUE = return $ t ^. #then
 --   | t ^. #cond == FALSE = return $ t ^. #else
 --   | otherwise = (\cond -> IF $ t & #cond .~ cond) <$> eval (t ^. #cond)
@@ -411,7 +411,7 @@ eval1 (ProjectionTerm t) = case t ^. #term of
   RecordTerm fields -> snd <$> fields Map.!? (t ^. #label)
   term -> (\term' -> ProjectionTerm $ t & #term .~ term') <$> eval1 term
 eval1 (UpdateTerm t) = case t ^. #record of
-  RecordTerm fields | all (isVal . snd) fields && isVal new -> 
+  RecordTerm fields | all (isVal . snd) fields && isVal new ->
     case fields Map.!? label of
       Just (v, _) -> return . RecordTerm $ Map.insert label (v, new) fields
       Nothing -> Nothing
@@ -475,7 +475,7 @@ kinding (ArrowType ty) = do
       codomain = ty ^. #codomain
   domainK <- kinding domain
   codomainK <- kinding codomain
-  if domainK /= StarKind 
+  if domainK /= StarKind
     then failed domain domainK
     else if codomainK /= StarKind
       then failed codomain codomainK
@@ -542,7 +542,7 @@ topOf (ArrowKind k) = AbstractionType $ #name @= "_" <: #kind @= k ^. #domain <:
 restoreNameInKinding :: NameLess f 'False TypedBinding => f 'False -> Eff '[EitherDef KindingError, ReaderDef TypingContext] (f 'True)
 restoreNameInKinding = mapLeftDef RestoreNameErrorWhileKinding . restoreName
 
-data TypingError = 
+data TypingError =
     MissingDeclarationInTypingContext (ContextError 'True TypedBinding)
   | MissingVariableInTypingContext (ContextError 'False TypedBinding)
   | MissingRecordLabel SString NamedTerm
@@ -584,7 +584,7 @@ typing Unit = return UnitType
 typing Zero = return NatType
 typing (Succ t) = do
   ty <- typing t
-  mapLeftDef PromotingError (ty `isSubTypeOf` NatType) >>= 
+  mapLeftDef PromotingError (ty `isSubTypeOf` NatType) >>=
     bool
       (failed ty)
       (return NatType)
@@ -625,7 +625,7 @@ typing (ApplicationTerm t) = do
     ArrowType ty1' -> do
       let domain = ty1' ^. #domain
       mapLeftDef PromotingError (ty2 `isSubTypeOf` domain) >>=
-        bool 
+        bool
           (failed1 ty2 domain)
           (return $ ty1' ^. #codomain)
     _ -> failed2 ty1
@@ -657,13 +657,13 @@ typing (UpdateTerm t) = do
   record <- typing $ t ^. #record
   record' <- castEff $ expose record
   case record' of
-    RecordType fields -> 
+    RecordType fields ->
       case fields Map.!? (t ^. #label) of
-        Just (v, old) 
+        Just (v, old)
           | v /= Invariant -> throwError . InvariantExpected (t ^. #label) =<< restoreNameInTyping (UpdateTerm t)
           | otherwise -> do
             new <- typing $ t ^. #new
-            mapLeftDef PromotingError (new `isSubTypeOf` old) >>= 
+            mapLeftDef PromotingError (new `isSubTypeOf` old) >>=
               bool
                 (failed1 new old)
                 (return record)
@@ -791,14 +791,14 @@ leaveTyping ctx t = leaveEff . (`runReaderDef` ctx) . runEitherDef $ do
   t' <- mapLeftDef (NameLessError . UnNameError) $ unName t
   ty <- mapLeftDef TypingError $ typing t'
   mapLeftDef (NameLessError . RestoreNameError) $ restoreName ty
- 
+
 
 expose :: UnNamedType -> Eff '[ReaderDef TypingContext] UnNamedType
 expose ty = do
   ty' <- castEff $ normalize ty
   runEitherDef (promoteVariable ty') >>= either (const $ return ty') expose
 
-data PromotingError = 
+data PromotingError =
     MissingTypeVariableInNamingContextWhilePromoting DeBrujinIndex TypingContext
   | UnMatchedPromoting
   deriving (Eq)
@@ -829,7 +829,7 @@ normalize (ApplicationType ty) = do
     _ -> return . ApplicationType $ ty & #function .~ f
 normalize ty = return ty
 leaveNormalize :: TypingContext -> NamedType -> Either (NameLessErrors TypedBinding) NamedType
-leaveNormalize ctx ty = leaveEff . (`runReaderDef` ctx) . runEitherDef $ mapLeftDef UnNameError (unName ty) >>= castEff . normalize >>=  mapLeftDef RestoreNameError . restoreName 
+leaveNormalize ctx ty = leaveEff . (`runReaderDef` ctx) . runEitherDef $ mapLeftDef UnNameError (unName ty) >>= castEff . normalize >>=  mapLeftDef RestoreNameError . restoreName
 
 isSubTypeOf :: UnNamedType -> UnNamedType -> Eff '[EitherDef PromotingError, ReaderDef TypingContext] Bool
 isSubTypeOf ty1 ty2 =
@@ -845,7 +845,7 @@ isSubTypeOf ty1 ty2 =
           (ArrowType ty1'', ArrowType ty2'') -> (&&) <$> ((ty1'' ^. #domain) `isSubTypeOf` (ty2'' ^. #domain)) <*> ((ty1'' ^. #codomain) `isSubTypeOf` (ty2'' ^. #codomain))
           (RecordType fields1, RecordType fields2) -> Map.foldrWithKey isSubTypeFieldOf (return True) fields2
             where
-              isSubTypeFieldOf label (v2, ty2'') mb = (&&) <$> mb <*> 
+              isSubTypeFieldOf label (v2, ty2'') mb = (&&) <$> mb <*>
                 case fields1 Map.!? label of
                   Just (v1, ty1'') | v1 == Invariant || v2 == Covariant -> ty1'' `isSubTypeOf` ty2''
                   _ -> return False
